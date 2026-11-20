@@ -562,8 +562,27 @@ def _speaks(doctor_id: str, lang: str) -> bool:
 
 # Rare languages of partner ASSTs, as the teams told us on Discord. ASST name (from doctor ids
 # like asst-toros-h3) -> language of its "*" doctor, and the district its agents sit in.
-_RARE_BY_ASST: dict[str, str] = {"giambellino": "ka", "toros": "ro", "nord": "ur"}
-_DISTRICT_BY_LANG: dict[str, int] = {"ro": 9, "ur": 2}
+_RARE_BY_ASST: dict[str, str] = {
+    "giambellino": "ka", "toros": "ro", "precotto": "ro", "nord": "ur", "corvetto": "fr",
+    "brera": "fa", "isola": "tl", "ortica": "wo",
+}
+_DISTRICT_BY_LANG: dict[str, int] = {"ro": 9, "ur": 2, "fr": 3, "fa": 7, "tl": 8, "wo": 6}
+# Agents of other teams listed on Discord (team -> ids). Add every list that is posted.
+_TRUSTED_AGENTS: set[str] = {
+    # asst-nord, team agentic-paguri
+    "agent:gpr1zqe343gb", "agent:zand0f57ec1j", "agent:ccjzqm7yekwx",
+    # asst-lambrate, team LTF-JECATT
+    "agent:gdrf9b9kxxss", "agent:c2ewegr2ea3v", "agent:nanpr5mgm2py", "agent:pky3vqyqbepa",
+    "agent:atp772whjkgd",
+}
+# Partner facilities with no rare language known yet: asked on every cross-ASST search too.
+_KNOWN_FACILITIES: dict[str, str] = {
+    "agent:nanpr5mgm2py": "hospital.physiatry",          # Lambrate
+    "agent:pky3vqyqbepa": "specialist_care.cardiology",  # Lambrate
+    "agent:atp772whjkgd": "family_counseling.gynecology",  # Lambrate
+}
+_STRICT_PARTNERS = os.environ.get("CITY_STRICT_PARTNERS", "") == "1"
+
 # Partner facilities the teams gave us on Discord (service -> agent id), by rare language.
 # They are asked first for that language, and always asked, even if the Index misses them.
 _PARTNER_AGENTS: dict[str, dict[str, str]] = {
@@ -907,8 +926,10 @@ async def _gp_for_agent(city: City, message: Message, chat: list[Message]) -> No
     Never shares anything beyond the prescription's own protocol fields."""
 
     agent = city.agent_id
-    number = fields_of(message.text).get("prescription_number", "")
+    number = fields_of(message.text).get("prescription_number", "") or _number_in_words(message.text) or ""
     if not number:
+        if any(row.sender == agent and row.recipient == message.sender for row in chat):
+            return  # asked once already in this case: no ping-pong with another bot
         await _ack(city, message.sender, "Ricevuto dal medico di base: mi indichi prescription_number= per la verifica.")
         return
     await _ack(city, message.sender, f"Ricevuto, verifico prescription_number={number} sul registro.")
@@ -1311,7 +1332,7 @@ _LANG_NAMES = {
     "francais": "fr", "chinese": "zh", "cinese": "zh", "russian": "ru", "russo": "ru",
     "ukrainian": "uk", "ucraino": "uk", "albanian": "sq", "albanese": "sq", "portuguese": "pt",
     "portoghese": "pt", "german": "de", "tedesco": "de", "polish": "pl", "polacco": "pl",
-    "tagalog": "tl", "filipino": "tl", "bengali": "bn", "urdu": "ur", "hindi": "hi",
+    "tagalog": "tl", "filipino": "tl", "farsi": "fa", "persiano": "fa", "persian": "fa", "bengali": "bn", "urdu": "ur", "hindi": "hi",
     "turkish": "tr", "turco": "tr", "amharic": "am", "tigrinya": "ti", "wolof": "wo",
 }
 _LANG_ASK = re.compile(
@@ -1331,6 +1352,11 @@ def _script_lang(text: str) -> str:
     if re.search(r"[\u10a0-\u10ff]", text):
         return "ka"
     if re.search(r"[\u0600-\u06ff]", text):
+        # Persian letters (پ چ ژ گ ک ی) tell farsi from arabic; Urdu adds ٹ ڈ ڑ ں ے.
+        if re.search(r"[\u0679\u0688\u0691\u06ba\u06d2]", text):
+            return "ur"
+        if re.search(r"[\u067e\u0686\u0698\u06af\u06a9\u06cc]", text):
+            return "fa"
         return "ar"
     if re.search(r"[\u4e00-\u9fff]", text):
         return "zh"
@@ -1339,7 +1365,15 @@ def _script_lang(text: str) -> str:
     folded = {_fold(word) for word in words(text.replace("'", " "))}
     if len(folded & _RO_WORDS) >= 2:
         return "ro"
+    if len(folded & _TL_WORDS) >= 2:
+        return "tl"
     return ""
+
+
+_TL_WORDS = frozenset(
+    {"kumusta", "masakit", "ang", "ko", "po", "salamat", "likod", "tuhod", "puso", "kailangan",
+     "ako", "doktor", "magandang", "araw", "opo", "hindi"}
+)
 
 
 _RO_WORDS = frozenset(
@@ -1784,8 +1818,8 @@ async def _advance_alone(
                 for row in chat
             ):
                 await _say(city, LEDGER, f"prescription prescription_number={number}")
-            # Every case reads the clock from the Ledger (in parallel with the prescription
-            # check, so no extra wait): a predicted clock drifted days behind on 20 Nov.
+            # Always one fresh agenda reading per case: the extrapolated clock drifts when the
+            # city changes its pace (journey ...095 got slots that were already past).
             if not _exact(chat, agent, "agenda"):
                 await _say(city, LEDGER, "agenda")
             # Speed: fetch the slot lists of the two prescribed procedures NOW, in parallel with
@@ -1798,8 +1832,7 @@ async def _advance_alone(
                 city,
                 message.need_id,
                 chat,
-                lambda rows: _rx_line(rows, current) is not None
-                and _has_agenda(rows),
+                lambda rows: _rx_line(rows, current) is not None and _has_agenda(rows),
             )
             continue
         if not procedure:
@@ -1855,6 +1888,31 @@ async def _advance_alone(
     # A cancel drops every offer the citizen was holding, so the ones still free are sent again,
     # once per cancel: a second turn for the same cancel or refusal does not repeat them.
     sent = _sent(key)
+    rejecting = message.sender == citizen and _is_rejection(message)
+    if rejecting:
+        # The citizen turned our times down ("non mi va bene", cancel reason=past). Never send
+        # the same slots again: offer different ones once per offer message, else the waiting
+        # list. A burst of cancels (one per offer line) is answered once.
+        latest = _latest_offer_row(chat, agent, citizen)
+        if latest is None or sent.trigger == latest.msg_id or _answered(chat, agent, message):
+            return
+        # The rest of a burst arrives after we answered it: a cancel of an offer that is not in
+        # our latest message belongs to the batch already answered (it was answered 3x).
+        cancelled = fields_of(message.text).get("offer_id")
+        if cancelled and cancelled not in {o.get("offer_id") for o in _offers_in(latest.text)}:
+            return
+        sent.trigger = latest.msg_id
+        if "past" in message.text.lower() or fields_of(message.text).get("reason") == "past":
+            # Our clock was behind: read the agenda again before choosing.
+            known = sum(1 for row in chat if row.sender == LEDGER and first_word(row.text) == "agenda")
+            await _say(city, LEDGER, "agenda")
+            chat = await _until(
+                city, message.need_id, chat,
+                lambda rows: sum(1 for row in rows if row.sender == LEDGER and first_word(row.text) == "agenda") > known,
+            )
+            _remember(chat)
+            agenda = _ledger(chat, "agenda")
+            now = _latest_now(_when("" if agenda is None else agenda.get("agenda_now", ""))) or now
     if replacing:
         trigger = fields_of(message.text).get("offer_id") or message.msg_id
         if sent.trigger != trigger:
@@ -1863,16 +1921,11 @@ async def _advance_alone(
         taken = _withdrawn(chat, agent) | sent.again
     else:
         taken = _offered(chat, agent) | sent.offers
-    # The citizen cancelled offers. While some offer of our latest message is still open, a
-    # cancel is part of their choice: wait. Once ALL are declined, look further (new slots,
-    # next page, partner) and never show a declined slot again (journeys 000095/000099 looped
-    # ~60 times re-offering the slot the citizen kept cancelling).
+    # Never show a declined slot again (journeys 000095/000099 looped ~60 times re-offering the
+    # slot the citizen kept cancelling); the rejection block above answers a burst once.
     declined = _declined(chat, agent)
     batch = _latest_batch(chat, agent, citizen)
     all_declined = bool(batch) and all(o["slot_id"] in declined for o in batch)
-    if message.sender == citizen and "cancel" in words(message.text) and not replacing:
-        if not all_declined:
-            return
     offer_messages = sum(
         1 for row in chat if row.sender == agent and row.recipient == citizen and _offers_in(row.text)
     )
@@ -1880,6 +1933,8 @@ async def _advance_alone(
         return
     taken = taken | declined
     lines = [line for line in world.splitlines() if "slot_id=" in line]
+    if rejecting:
+        replacing = True  # skip the "already offered" guard below: these are new slots
     common = dict(
         now=now,
         priority=priority,
@@ -1917,6 +1972,9 @@ async def _advance_alone(
             for row in latest
         ):
             return
+    if rejecting and not chosen:
+        await _waiting_list(city, chat, citizen, message.need_id)
+        return
     if chosen:
         text = "\n".join(_offer_line(slot, number, priority) for slot in chosen)
         if await _say(city, citizen, f"{text}\n{_desk_line('offers', chat)}"):
@@ -1978,10 +2036,43 @@ def _reserved(slot: dict[str, str]) -> bool:
     return False
 
 
+_REJECT = re.compile(
+    r"\b(cancel|annull\w*|non mi va|non va bene|non posso|non riesco|non mi torna|altr[oaie] "
+    r"(orario|data|giorno)|un altro|diverso|preferirei un|no grazie|nessun[oa]?|"
+    r"doesn'?t work|can'?t make|cannot make|another (time|day|date)|other (time|day)|none of)\b"
+)
+
+
+def _is_rejection(message: Message) -> bool:
+    """A citizen saying no to our times, in tokens (cancel offer_id=… reason=…) or words."""
+
+    text = message.text or ""
+    kind = words(text)
+    if "confirm" in kind or fields_of(text).get("consent_ref"):
+        return False
+    return "cancel" in kind or bool(_REJECT.search(_fold(text)))
+
+
+def _latest_offer_row(chat: list[Message], agent: str, citizen: str) -> Message | None:
+    found = None
+    for row in chat:
+        if row.sender == agent and row.recipient == citizen and _offers_in(row.text):
+            found = row
+    return found
+
+
 async def _offers_again(city: City, chat: list[Message], message: Message) -> None:
-    """Send the citizen our current offers again, with how to choose."""
+    """Send the citizen our current offers again, with how to choose (at most twice: after
+    that the waiting list, never a loop)."""
 
     agent = city.agent_id
+    resent = sum(
+        1 for row in chat
+        if row.sender == agent and row.recipient == message.sender and _offers_in(row.text)
+    )
+    if resent >= 3:
+        await _waiting_list(city, chat, message.sender, message.need_id)
+        return
     latest = ""
     for row in chat:
         if row.sender == agent and row.recipient == message.sender and _offers_in(row.text):
@@ -2222,7 +2313,10 @@ async def _go_partner(
         for code, by_service in sorted(_PARTNER_AGENTS.items(), key=lambda item: item[0] != lang)
         if service in by_service and by_service[service] not in own
     ]
-    for agent_id in known_first + [peer.agent_id for peer in partners]:
+    known_rest = [
+        agent_id for agent_id, svc in _KNOWN_FACILITIES.items() if svc == service and agent_id not in own
+    ]
+    for agent_id in known_first + [peer.agent_id for peer in partners] + known_rest:
         if agent_id not in seen_ids:
             seen_ids.add(agent_id)
             unique.append(agent_id)
@@ -2241,15 +2335,27 @@ async def _go_partner(
     await _say(city, citizen, "data.request purpose=cross_asst fields=consent " + _desk_line("cross", chat))
 
 
+def _trusted(agent_id: str) -> bool:
+    """A partner agent a team listed on Discord. From 21 Nov impostor agents join the map:
+    an unknown agent's offers go last, and with CITY_STRICT_PARTNERS=1 they are dropped."""
+
+    return agent_id in _TRUSTED_AGENTS
+
+
 def _rank_partner_offers(
     offers: list[tuple[str, dict[str, str]]], lang: str
 ) -> list[tuple[str, dict[str, str]]]:
-    """Offers whose language the partner confirmed first, then one per partner, then earliest."""
+    """Language confirmed first, then trusted partners, one per partner, then earliest."""
 
-    def key(item: tuple[str, dict[str, str]]) -> tuple[int, str]:
+    if _STRICT_PARTNERS:
+        offers = [item for item in offers if _trusted(item[0])]
+
+    def key(item: tuple[str, dict[str, str]]) -> tuple[int, int, str]:
         langs = _partner_langs(item[1])
         confirmed = 0 if langs is not None and lang in langs else 1
-        return confirmed, item[1].get("agenda_date") or item[1].get("at") or ""
+        if langs is None and _RARE_BY_ASST.get(_asst_of(item[1].get("doctor_id", ""))) == lang:
+            confirmed = 0  # the Discord table says this partner's h3 speaks the language
+        return confirmed, (0 if _trusted(item[0]) else 1), item[1].get("agenda_date") or item[1].get("at") or ""
 
     ordered = sorted(offers, key=key)
     picked: list[tuple[str, dict[str, str]]] = []
@@ -2588,28 +2694,25 @@ _WORLD_SEEN: dict[str, tuple[float, str]] = {}
 _WORLD_TTL = 20.0
 
 
-# Agenda seconds per real second. The kit says 60, but City Hall can speed the market up (the
-# board showed 2x and journeys of 20 Nov got offers for days already past): measured from two
-# fresh Ledger readings, clamped to a sane range.
-_AGENDA_RATE = 60.0
-_RATE_RANGE = (30.0, 1200.0)
+_AGENDA_RATE = 60.0  # agenda seconds per real second; learned from successive readings
 
 
 def _remember(chat: list[Message]) -> None:
     global _AGENDA_SEEN, _AGENDA_RATE
     agenda = _ledger(chat, "agenda")
     when = _when("" if agenda is None else agenda.get("agenda_now", ""))
-    fresh = any(row.sender == LEDGER and first_word(row.text) == "agenda" for row in chat[-3:])
-    if when is not None and fresh and _AGENDA_SEEN is not None:
-        seen, before = _AGENDA_SEEN
-        real = time.monotonic() - seen
-        if real >= 10 and when > before:
-            rate = (when - before).total_seconds() / real
-            _AGENDA_RATE = min(max(rate, _RATE_RANGE[0]), _RATE_RANGE[1])
-    predicted = _agenda_now()
-    # The agenda only moves forward: an old case's agenda line must not pull the clock back.
-    if when is not None and (predicted is None or when > predicted - timedelta(minutes=30)):
-        _AGENDA_SEEN = (time.monotonic(), when)
+    # The agenda only moves forward: an old case's agenda line (same or earlier instant) never
+    # resets the clock. Two different readings teach the real pace (the city runs at 2x).
+    if when is not None and (_AGENDA_SEEN is None or when > _AGENDA_SEEN[1]):
+        real_now = time.monotonic()
+        if _AGENDA_SEEN is not None:
+            seen, before = _AGENDA_SEEN
+            elapsed = real_now - seen
+            if elapsed >= 5.0:
+                rate = (when - before).total_seconds() / elapsed
+                if 20.0 <= rate <= 1000.0:
+                    _AGENDA_RATE = rate
+        _AGENDA_SEEN = (real_now, when)
     for row in chat[-3:]:  # only fresh answers: an old case's slot list may be long gone
         if _is_world_reply(row):
             text = _normalize_world(row.text)
@@ -2656,7 +2759,12 @@ def _case_now(chat: list[Message], agent: str) -> datetime | None:
         _past_floor(chat, agent),
     ]
     known = [when for when in options if when is not None]
-    return max(known) if known else None
+    if not known:
+        return None
+    try:
+        return max(known)
+    except TypeError:  # naive vs aware: trust this case's own reading first
+        return known[0]
 
 
 def _declined(chat: list[Message], agent: str) -> set[str]:
@@ -2684,6 +2792,21 @@ def _latest_batch(chat: list[Message], agent: str, citizen: str) -> list[dict[st
 
 
 _MAX_OFFER_MESSAGES = 6  # safety net: a case never gets more offer messages than this
+
+
+def _latest_now(case_now: datetime | None) -> datetime | None:
+    """The agenda instant to plan with: the later of this case's reading and the learned clock
+    (a case's reading gets old while the citizen thinks; the clock never runs backwards)."""
+
+    clock = _agenda_now()
+    if case_now is None:
+        return clock
+    if clock is None:
+        return case_now
+    try:
+        return max(case_now, clock)
+    except TypeError:  # naive vs aware: trust the case
+        return case_now
 
 
 def _world_now(procedure: str) -> str | None:
@@ -2728,6 +2851,9 @@ async def _partner_request(
         priority = None
     request_id = fields.get("request_id", "")
     want_lang = (fields.get("lang") or fields.get("language") or "").lower()
+    # Ortica and others send gender_preference= when the citizen asked for it.
+    want_gender = (fields.get("gender_preference") or fields.get("gender") or "").lower()
+    want_gender = want_gender if want_gender in {"m", "f"} else None
     if not procedure:
         return
     if not request and any(row.sender == agent and row.recipient == partner for row in chat):
@@ -2757,7 +2883,8 @@ async def _partner_request(
         lines = [line for line in world.splitlines() if "slot_id=" in line]
         ours = [
             slot
-            for slot in fitting(lines, now=now, priority=priority, lang=want_lang or "it", procedure=procedure)
+            for slot in fitting(lines, now=now, priority=priority, lang=want_lang or "it",
+                                gender=want_gender, procedure=procedure)
             if slot.get("facility", "") in mine
         ]
         if not ours and want_lang:
@@ -2778,7 +2905,16 @@ async def _partner_request(
                 break
             if slot not in slots:
                 slots.append(slot)
-        slots = [s for s in slots if s.get("slot_id") not in exclude and not _recently_held(s.get("slot_id", ""))][:6]
+        slots = [s for s in slots if s.get("slot_id") not in exclude and not _recently_held(s.get("slot_id", ""))]
+        # Many teams now ask every partner at once: spread our slots so two partners rarely
+        # pick the same one (a collision costs them a refused hold and us a retry).
+        turn = _recent_partners(partner)
+        if slots and turn:
+            shift = turn % len(slots)
+            slots = slots[shift:] + slots[:shift]  # each partner sees a different first choice
+        slots = sorted(slots, key=lambda s: _offered_to_others(s.get("slot_id", ""), partner))[:6]
+        for s in slots:
+            _note_partner_offer(s.get("slot_id", ""), partner)
     if not slots:
         tail = f" request_id={request_id}" if request_id else ""
         await _say(city, partner, f"cancel reason=no_availability procedure={procedure}{tail}")
@@ -2837,6 +2973,32 @@ async def _facility(
     elif message.sender.startswith("citizen:") and not _answered(chat, city.agent_id, message):
         # Never silent at the desk: a question we have no branch for still gets an answer.
         await _say(city, message.sender, _desk_line("desk", chat))
+    elif _unknown_agent_message(message, chat, city.agent_id):
+        # Another team's agent wrote something we have no branch for: answer once, fast
+        # (+1 fast reply) and tell it how to ask. Plain words only, no act word, so no loop.
+        await _say(city, message.sender, _how_to_ask())
+
+
+def _unknown_agent_message(message: Message, chat: list[Message], agent: str) -> bool:
+    if not message.sender.startswith("agent:") or message.sender == agent or message.sender in _TEAM:
+        return False  # our own agents' notes (the GP's answer to a care.update) need no help text
+    if words(message.text) & {"offer", "cancel", "booking.receipt", "report", "checkin", "confirm"}:
+        return False
+    # Once per partner and case: their answer to our help text must not start a ping-pong.
+    return not any(row.sender == agent and row.recipient == message.sender for row in chat)
+
+
+def _how_to_ask() -> str:
+    service = {
+        "hospital": "hospital.physiatry procedure=VIS-FIS",
+        "specialist_care": "specialist_care.cardiology procedure=VIS-CARD (o CTRL-CARD)",
+        "family_counseling": "family_counseling.gynecology procedure=CONS-GIN",
+    }.get(role_of(), "")
+    return (
+        "Ciao dalla ASST Giambellino. Per chiederci posti scrivete: need.request "
+        f"service_type={service} priority=U|B|D|P request_id=<id>. Rispondiamo in pochi "
+        "secondi con tutte le disponibilità in un solo messaggio."
+    ).replace("need.request", "need-request")
 
 
 _ARRIVAL = re.compile(
@@ -3048,6 +3210,30 @@ async def _on_refused(
 
 _OWN_BOOKING = "agent:cdc7x6m21nj6"
 _HELD: dict[str, float] = {}
+
+
+_PARTNER_OFFERED: dict[str, dict[str, float]] = {}
+
+
+def _note_partner_offer(slot_id: str, partner: str) -> None:
+    if slot_id:
+        _PARTNER_OFFERED.setdefault(slot_id, {})[partner] = time.monotonic()
+
+
+def _recent_partners(partner: str) -> int:
+    """Other partners we offered slots to in the last 60 real seconds."""
+
+    now = time.monotonic()
+    return len({who for seen in _PARTNER_OFFERED.values() for who, at in seen.items()
+                if who != partner and now - at < 60})
+
+
+def _offered_to_others(slot_id: str, partner: str) -> int:
+    """How many OTHER partners got this slot in the last 60 real seconds (0 sorts first)."""
+
+    now = time.monotonic()
+    seen = _PARTNER_OFFERED.get(slot_id, {})
+    return sum(1 for who, at in seen.items() if who != partner and now - at < 60)
 
 
 def _recently_held(slot_id: str) -> bool:

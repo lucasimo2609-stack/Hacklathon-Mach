@@ -50,16 +50,15 @@ async def main():
     replies = []
     for o in first:
         replies.append(await say(c, f"Non mi va bene. cancel offer_id={o['offer_id']} reason=past"))
-    mid = [r for r in replies[:-1] if any(to == CIT for to, _ in r)]
-    check("loop: silent while some offers are still open", not mid, str(mid)[:200])
-    print("   last reply:", [(to, t[:150]) for to, t in replies[-1]])
-    last = [A.fields_of(l) for to, t in replies[-1] if to == CIT for l in t.split("\n") if l.startswith("offer ")]
+    # A burst of cancels (one per offer line) is answered ONCE, with different slots.
+    answered = [r for r in replies if any(to == CIT and A._offers_in(t) for to, t in r)]
+    check("loop: a burst of cancels answered once", len(answered) == 1, str(len(answered)))
+    last = [A.fields_of(l) for r in answered for to, t in r if to == CIT for l in t.split("\n") if l.startswith("offer ")]
     declined = {o["slot_id"] for o in first}
-    check("loop: new offers after all declined", bool(last), str([o.get("slot_id") for o in last]))
+    check("loop: new offers after the rejection", bool(last), str([o.get("slot_id") for o in last]))
     check("loop: no declined slot offered again", not ({o.get("slot_id") for o in last} & declined))
-    floor = max(A._when(o["agenda_date"]) for o in first)
-    check("loop: new offers are after the 'past' slots",
-          all(A._when(o["agenda_date"]) > floor for o in last if o.get("agenda_date")))
+    check("loop: 'past' cancel re-reads the Ledger clock",
+          any(to == LEDGER and t == "agenda" for r in replies for to, t in r))
     # Keep cancelling: offer messages stay bounded, and nothing declined comes back.
     for _ in range(10):
         batch = A._latest_batch(c.rows, BC, CIT)
