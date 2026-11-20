@@ -790,7 +790,7 @@ def _speaks(doctor_id: str, lang: str) -> bool:
 # like asst-toros-h3) -> language of its "*" doctor, and the district its agents sit in.
 _RARE_BY_ASST: dict[str, str] = {
     "giambellino": "ka", "toros": "ro", "precotto": "ro", "nord": "ur", "corvetto": "fr",
-    "brera": "fa", "isola": "tl", "ortica": "wo", "greco": "si", "bicocca": "ti",
+    "brera": "fa", "isola": "tl", "ortica": "wo", "greco": "si", "bicocca": "ti", "lambrate": "ja",
 }
 _DISTRICT_BY_LANG: dict[str, int] = {"ro": 9, "ur": 2, "fr": 3, "fa": 7, "tl": 8, "wo": 6}
 # Agents of other teams listed on Discord (team -> ids). Add every list that is posted.
@@ -824,6 +824,11 @@ _STRICT_PARTNERS = os.environ.get("CITY_STRICT_PARTNERS", "") == "1"
 # Partner facilities the teams gave us on Discord (service -> agent id), by rare language.
 # They are asked first for that language, and always asked, even if the Index misses them.
 _PARTNER_AGENTS: dict[str, dict[str, str]] = {
+    "ja": {  # asst-lambrate, team LTF-JECATT (Japanese)
+        "hospital.physiatry": "agent:nanpr5mgm2py",
+        "specialist_care.cardiology": "agent:pky3vqyqbepa",
+        "family_counseling.gynecology": "agent:atp772whjkgd",
+    },
     "si": {  # asst-greco, team tartufi-pazzi (Sinhala)
         "hospital.physiatry": "agent:xtj1dk9x3qej",
         "specialist_care.cardiology": "agent:q18es2d82f8r",
@@ -1672,7 +1677,7 @@ _LANG_NAMES = {
     "ukrainian": "uk", "ucraino": "uk", "albanian": "sq", "albanese": "sq", "portuguese": "pt",
     "portoghese": "pt", "german": "de", "tedesco": "de", "polish": "pl", "polacco": "pl",
     "tagalog": "tl", "filipino": "tl", "farsi": "fa", "persiano": "fa", "persian": "fa",
-    "singalese": "si", "sinhala": "si", "sinhalese": "si", "cingalese": "si", "tigrino": "ti",
+    "giapponese": "ja", "japanese": "ja", "singalese": "si", "sinhala": "si", "sinhalese": "si", "cingalese": "si", "tigrino": "ti",
     "wolof": "wo", "bengali": "bn", "urdu": "ur", "hindi": "hi",
     "turkish": "tr", "turco": "tr", "amharic": "am", "tigrinya": "ti", "wolof": "wo",
 }
@@ -1699,6 +1704,8 @@ def _script_lang(text: str) -> str:
         if re.search(r"[\u067e\u0686\u0698\u06af\u06a9\u06cc]", text):
             return "fa"
         return "ar"
+    if re.search(r"[\u3040-\u30ff]", text):
+        return "ja"  # hiragana / katakana (kanji alone would be Chinese)
     if re.search(r"[\u0d80-\u0dff]", text):
         return "si"  # Sinhala script
     if re.search(r"[\u1200-\u137f]", text):
