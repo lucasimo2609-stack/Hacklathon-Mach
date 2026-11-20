@@ -26,7 +26,7 @@ ROLES = ("booking_centre", "gp", "hospital", "specialist_care", "family_counseli
 _MAX_PAGE = 8
 # Four agenda hours is about half a minute of real time at 480x, so a slot is still
 # ahead when the citizen decides. One hour was already past by then.
-_LEAD = timedelta(hours=4)
+_LEAD = timedelta(hours=2)  # level 4 (scarcity): keep same-day slots; the chain takes seconds
 # Doctor key (the last segment of doctor_id) -> languages, gender, days. ``*`` is the ASST's
 # rare language. The Ledger's slot line names the doctor; it does not repeat this table.
 _DOCTORS: dict[str, tuple[frozenset[str], str, frozenset[str]]] = {
@@ -803,6 +803,9 @@ _TRUSTED_AGENTS: set[str] = {
     # asst-bicocca, team p4radigm
     "agent:ez8cb7j167p2", "agent:rng5wcrzvhsj", "agent:bb01ggxymm05", "agent:sh35cbsy287d",
     "agent:nkh372rd16yq",
+    # asst-bovisa, team prompt-soccorso
+    "agent:vgtmj5nqfkxj", "agent:h82xpx3rkn9e", "agent:gxq3vzgt3h5t", "agent:tty8erdj6t41",
+    "agent:txar5994gbkj",
     # asst-lambrate, team LTF-JECATT
     "agent:gdrf9b9kxxss", "agent:c2ewegr2ea3v", "agent:nanpr5mgm2py", "agent:pky3vqyqbepa",
     "agent:atp772whjkgd",
@@ -812,6 +815,9 @@ _KNOWN_FACILITIES: dict[str, str] = {
     "agent:nanpr5mgm2py": "hospital.physiatry",          # Lambrate
     "agent:pky3vqyqbepa": "specialist_care.cardiology",  # Lambrate
     "agent:atp772whjkgd": "family_counseling.gynecology",  # Lambrate
+    "agent:gxq3vzgt3h5t": "hospital.physiatry",          # Bovisa
+    "agent:tty8erdj6t41": "specialist_care.cardiology",  # Bovisa
+    "agent:txar5994gbkj": "family_counseling.gynecology",  # Bovisa
 }
 _STRICT_PARTNERS = os.environ.get("CITY_STRICT_PARTNERS", "") == "1"
 
