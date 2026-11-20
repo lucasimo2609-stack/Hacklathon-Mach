@@ -1,7 +1,7 @@
 agent_id: agent:c32jyk0cyan7
 team: team:red-agent
 name: gp
-version: 1.0.4
+version: 1.0.5
 cap_versions:
   - "1.0"
 profiles:
