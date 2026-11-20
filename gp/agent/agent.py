@@ -1779,9 +1779,27 @@ def _partner_offers(chat: list[Message], agent: str) -> list[tuple[str, dict[str
     return found
 
 
+def _partner_langs(offer: dict[str, str]) -> set[str] | None:
+    """The doctor's languages when the partner says them (doctor_lang=it/ka), else None."""
+
+    raw = offer.get("doctor_lang") or offer.get("languages") or offer.get("lang") or ""
+    langs = {part.strip().lower() for part in re.split(r"[/,;]", raw) if part.strip()}
+    return langs or None
+
+
 def _fits_partner(offer: dict[str, str], chat: list[Message], priority: str | None) -> bool:
     doctor = offer.get("doctor_id", "")
-    if doctor and doctor.rsplit("-", 1)[-1] in _DOCTORS and not _speaks(doctor, _lang(chat)):
+    lang = _lang(chat)
+    langs = _partner_langs(offer)
+    if langs is not None:
+        # The partner told us who speaks what: trust it over our own doctor table.
+        if lang not in langs:
+            return False
+    elif doctor and doctor.rsplit("-", 1)[-1] in _DOCTORS and not _speaks(doctor, lang):
+        return False
+    gender = _gender(chat)
+    said_gender = (offer.get("doctor_gender") or "").lower()
+    if gender and said_gender in {"m", "f"} and said_gender != gender:
         return False
     agenda = _ledger(chat, "agenda")
     now = _when("" if agenda is None else agenda.get("agenda_now", ""))
@@ -1795,6 +1813,9 @@ def _fits_partner(offer: dict[str, str], chat: list[Message], priority: str | No
     if priority in _DEADLINE_DAYS:
         return at < now + timedelta(days=_DEADLINE_DAYS[priority])
     return True
+
+
+_MAX_PARTNERS = 30
 
 
 async def _go_partner(
@@ -1828,18 +1849,51 @@ async def _go_partner(
             and peer.role != "booking_centre"
             and any(cap == service or cap.startswith(family) for cap in peer.capabilities)
         ]
-    asked = 0
-    for peer in partners[:3]:
-        asked += await _say(
-            city,
-            peer.agent_id,
-            f"need.request service_type={service} procedure={procedure} priority={priority or 'D'} "
-            f"request_id={need_id or 'case'} Richiesta di disponibilità da un'ASST partner.",
-        )
+    # Ask EVERY partner of this service at once, not three at random: we do not know which
+    # ASST has the doctor (language, gender, day) this citizen needs, and answers come back
+    # in seconds. The offers are filtered on our side (_fits_partner, doctor_lang=).
+    seen_ids: set[str] = set()
+    unique = []
+    for peer in partners:
+        if peer.agent_id not in seen_ids:
+            seen_ids.add(peer.agent_id)
+            unique.append(peer)
+    text = (
+        f"need.request service_type={service} procedure={procedure} priority={priority or 'D'} "
+        f"request_id={need_id or 'case'} Richiesta di disponibilità da un'ASST partner."
+    )
+    results = await asyncio.gather(
+        *(_say(city, peer.agent_id, text) for peer in unique[:_MAX_PARTNERS]),
+        return_exceptions=True,
+    )
+    asked = sum(1 for ok in results if ok is True)
     if not asked:
         await _waiting_list(city, chat, citizen, need_id)
         return
     await _say(city, citizen, "consent purpose=cross_asst " + _desk_line("cross", chat))
+
+
+def _rank_partner_offers(
+    offers: list[tuple[str, dict[str, str]]], lang: str
+) -> list[tuple[str, dict[str, str]]]:
+    """Offers whose language the partner confirmed first, then one per partner, then earliest."""
+
+    def key(item: tuple[str, dict[str, str]]) -> tuple[int, str]:
+        langs = _partner_langs(item[1])
+        confirmed = 0 if langs is not None and lang in langs else 1
+        return confirmed, item[1].get("agenda_date") or item[1].get("at") or ""
+
+    ordered = sorted(offers, key=key)
+    picked: list[tuple[str, dict[str, str]]] = []
+    partners_seen: set[str] = set()
+    for sender, offer in ordered:
+        if sender not in partners_seen:
+            partners_seen.add(sender)
+            picked.append((sender, offer))
+    for item in ordered:
+        if item not in picked:
+            picked.append(item)
+    return picked
 
 
 async def _cross_turn(city: City, message: Message, chat: list[Message], citizen: str) -> None:
@@ -1867,7 +1921,8 @@ async def _cross_turn(city: City, message: Message, chat: list[Message], citizen
         (sender, offer)
         for sender, offer in _partner_offers(chat, agent)
         if offer.get("slot_id") not in forwarded and _fits_partner(offer, chat, priority)
-    ][:3]
+    ]
+    fresh = _rank_partner_offers(fresh, _lang(chat))[:6]
     if not fresh:
         if not forwarded:
             await _waiting_list(city, chat, citizen, message.need_id)
