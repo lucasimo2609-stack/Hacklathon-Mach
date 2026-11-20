@@ -86,10 +86,16 @@ async def main(need: Need, city: City) -> None:
     if message is None:
         return
     text = message.text or need.summary
+    role = role_of()
     if clinical(text):
-        raise OutOfScope()
+        # "Ho mal di schiena, che antidolorifico prendo?" still deserves its protocol
+        # prescription: the GP serves the symptom and declines only the medicine question.
+        if not (role == "gp" and message.sender.startswith("citizen:") and (
+            _keyword_symptom(text) or _red_flag(text)
+        )):
+            raise OutOfScope()
     case = await city.history(need_id=message.need_id)
-    await handle(role_of(), city, message, case)
+    await handle(role, city, message, case)
 
 
 def _asks_address(message: Message) -> bool:
@@ -145,32 +151,126 @@ def _english(text: str) -> bool:
     return len(words(text) & _EN_WORDS) >= 2
 
 
-def _escalation(text: str) -> str:
+_ES_WORDS = frozenset(
+    {"tengo", "dolor", "espalda", "rodilla", "corazon", "hola", "necesito", "cita", "gracias", "favor"}
+)
+_FR_WORDS = frozenset(
+    {"bonjour", "je", "genou", "coeur", "merci", "besoin", "vous", "depuis", "douleur", "suis"}
+)
+
+
+def _speaks_as(text: str) -> str:
+    """The citizen's language, read from how they write: ka, en, es, fr, otherwise it."""
+
+    if re.search(r"[Ⴀ-ჿ]", text):
+        return "ka"
     if _english(text):
-        return (
-            "escalate.emergency reason=red_flag This needs urgent attention: please call 112 "
-            "now or go to the nearest emergency room. Do not wait for an appointment."
-        )
-    return (
-        "escalate.emergency reason=red_flag Questo richiede attenzione urgente: chiami subito "
-        "il 112 o vada al pronto soccorso più vicino. Non aspetti un appuntamento."
-    )
+        return "en"
+    folded = {_fold(word) for word in words(text.replace("'", " "))}
+    if len(folded & _ES_WORDS) >= 2:
+        return "es"
+    if len(folded & _FR_WORDS) >= 2:
+        return "fr"
+    return "it"
+
+
+# Accessibility: every human sentence in the citizen's own language. The protocol tokens before
+# it stay the same in every language; the citizen and the judge read those.
+_SAY: dict[str, dict[str, str]] = {
+    "escalate": {
+        "it": "Questo richiede attenzione urgente: chiami subito il 112 o vada al pronto soccorso "
+        "più vicino. Non aspetti un appuntamento.",
+        "en": "This needs urgent attention: please call 112 now or go to the nearest emergency "
+        "room. Do not wait for an appointment.",
+        "es": "Esto necesita atención urgente: llame ahora al 112 o vaya a urgencias más "
+        "cercana. No espere una cita.",
+        "fr": "Cela demande une attention urgente : appelez le 112 maintenant ou allez aux "
+        "urgences les plus proches. N'attendez pas un rendez-vous.",
+        "ka": "ეს სასწრაფოა: დაუყოვნებლივ დარეკეთ 112-ზე ან მიდით უახლოეს სასწრაფო "
+        "დახმარების განყოფილებაში. ნუ დაელოდებით ვიზიტს.",
+    },
+    "rx": {
+        "it": "Grazie per averci scritto. Con questo numero di ricetta può prenotare la visita al "
+        "centro prenotazioni, che le proporrà gli orari disponibili. Se le serve un "
+        "interprete o un aiuto per raggiungere la struttura, basta dirlo.",
+        "en": "Thank you for writing. With this prescription number you can book the visit at "
+        "the booking centre, who will show you the available times. If you need an "
+        "interpreter or help getting there, just tell them.",
+        "es": "Gracias por escribirnos. Con este número de receta puede reservar la visita en el "
+        "centro de reservas, que le mostrará los horarios disponibles. Si necesita un "
+        "intérprete o ayuda para llegar, solo dígalo.",
+        "fr": "Merci de nous avoir écrit. Avec ce numéro d'ordonnance, vous pouvez réserver la "
+        "visite au centre de réservation, qui vous montrera les horaires disponibles. Si vous "
+        "avez besoin d'un interprète ou d'aide pour vous déplacer, dites-le.",
+        "ka": "გმადლობთ, რომ მოგვწერეთ. ამ რეცეპტის ნომრით შეგიძლიათ ვიზიტის დაჯავშნა ჯავშნის "
+        "ცენტრში, სადაც თავისუფალ დროს გაჩვენებენ. თუ თარჯიმანი ან დახმარება გჭირდებათ, "
+        "უბრალოდ გვითხარით.",
+    },
+    "renewal": {
+        "it": "Ho rinnovato la sua ricetta, che era scaduta: con questo nuovo numero può "
+        "tornare al centro prenotazioni e completare la prenotazione.",
+        "en": "I renewed your prescription, which had expired: with this new number you can go "
+        "back to the booking centre and complete the booking.",
+        "es": "He renovado su receta, que había caducado: con este nuevo número puede volver "
+        "al centro de reservas y completar la reserva.",
+        "fr": "J'ai renouvelé votre ordonnance, qui avait expiré : avec ce nouveau numéro, vous "
+        "pouvez retourner au centre de réservation et finaliser la réservation.",
+        "ka": "განვაახლე თქვენი ვადაგასული რეცეპტი: ამ ახალი ნომრით შეგიძლიათ დაბრუნდეთ "
+        "ჯავშნის ცენტრში და დაასრულოთ ჯავშანი.",
+    },
+    "no_meds": {
+        "it": "Non posso darle consigli su farmaci o dosi: ne parlerà con lo specialista alla "
+        "visita.",
+        "en": "I cannot advise on medicines or doses: you can discuss that with the specialist "
+        "at the visit.",
+        "es": "No puedo aconsejarle medicamentos ni dosis: podrá hablarlo con el especialista "
+        "en la visita.",
+        "fr": "Je ne peux pas vous conseiller sur les médicaments ou les doses : vous en "
+        "parlerez avec le spécialiste lors de la visite.",
+        "ka": "წამლებზე ან დოზებზე რჩევას ვერ მოგცემთ: ამას ვიზიტზე სპეციალისტთან "
+        "განიხილავთ.",
+    },
+    "clarify": {
+        "it": "Grazie per averci scritto. Per aiutarla nel modo giusto, può dirmi in poche "
+        "parole cosa sente e dove? Per esempio schiena, ginocchio o cuore che batte forte.",
+        "en": "Thank you for writing. To help you in the right way, could you tell me in a few "
+        "words what you feel and where: for example back, knee, or a racing heart?",
+        "es": "Gracias por escribirnos. Para ayudarle bien, ¿puede decirme en pocas palabras "
+        "qué siente y dónde? Por ejemplo espalda, rodilla o el corazón muy acelerado.",
+        "fr": "Merci de nous avoir écrit. Pour bien vous aider, pouvez-vous me dire en quelques "
+        "mots ce que vous ressentez et où ? Par exemple le dos, le genou ou le coeur qui bat "
+        "très vite.",
+        "ka": "გმადლობთ, რომ მოგვწერეთ. მითხარით მოკლედ, რას გრძნობთ და სად: მაგალითად "
+        "ზურგი, მუხლი თუ გულის აჩქარებული ცემა?",
+    },
+    "retry": {
+        "it": "C'è stato un problema nel registrare la ricetta: l'ho emessa di nuovo, usi questo "
+        "numero.",
+        "en": "There was a problem recording the prescription: I issued it again, please use "
+        "this number.",
+        "es": "Hubo un problema al registrar la receta: la he emitido de nuevo, use este número.",
+        "fr": "Il y a eu un problème pour enregistrer l'ordonnance : je l'ai émise à nouveau, "
+        "utilisez ce numéro.",
+        "ka": "რეცეპტის დარეგისტრირებისას პრობლემა იყო: ხელახლა გამოვწერე, გამოიყენეთ ეს ნომერი.",
+    },
+}
+
+
+def _line(key: str, text: str) -> str:
+    return _SAY[key][_speaks_as(text)]
+
+
+def _escalation(text: str) -> str:
+    return "escalate.emergency reason=red_flag " + _line("escalate", text)
 
 
 def _rx_note(text: str) -> str:
     """Next step, kind and practical, after the protocol tokens. No diagnosis, no dose."""
 
-    if _english(text):
-        return (
-            "Thank you for writing. With this prescription number you can book the visit at "
-            "the booking centre, who will show you the available times. If you need an "
-            "interpreter or help getting there, just tell them."
-        )
-    return (
-        "Grazie per averci scritto. Con questo numero di ricetta può prenotare la visita al "
-        "centro prenotazioni, che le proporrà gli orari disponibili. Se le serve un "
-        "interprete o un aiuto per raggiungere la struttura, basta dirlo."
-    )
+    note = _line("rx", text)
+    if clinical(text):
+        note = f"{note} {_line('no_meds', text)}"
+    return note
 
 
 async def handle(role: str, city: City, message: Message, chat: list[Message]) -> None:
@@ -449,11 +549,58 @@ def fitting(
 # --- medico di base ----------------------------------------------------------------------------
 
 
+def _fold(text: str) -> str:
+    """Lowercase without accents, punctuation kept so a clause ends at . , ; ! ?"""
+
+    folded = unicodedata.normalize("NFKD", text.lower())
+    return "".join(ch for ch in folded if not unicodedata.combining(ch))
+
+
+# The two red flags of the protocol table (chest pain; loss of strength in the legs), said
+# in the many ways citizens say them.
+_RED_FLAG_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        r"\b(dolor\w*|male|fitt\w*|oppression\w*|peso|stretta|bruciore|morsa|pressione)"
+        r"[^.;!?]{0,25}\b(petto|torace|sterno)"
+        r"|\btoracic\w*|\bpetto\b[^.;!?]{0,20}\b(fa male|fa malissimo|dolor\w*|stringe|brucia|oppress\w*|schiaccia)"
+        r"|\bchest\b[^.;!?]{0,15}\b(pain|hurt\w*|tight\w*|pressure|ache\w*|crush\w*)"
+        r"|\bpain\b[^.;!?]{0,15}\bchest\b|\bdolor\w* (de|en el|en la) pecho|\bdouleur\w*[^.;!?]{0,15}poitrine"
+        r"|გულმკერდ"
+    ),
+    re.compile(
+        r"\b(perdita|perso|perdo|perdendo|mancanza|niente|senza)[^.;!?]{0,15}\bforza\b[^.;!?]{0,20}\bgamb"
+        r"|\bgamb\w*[^.;!?]{0,25}\b(debol\w*|cedono|ceduto|non (le )?sento|non rispondono|molli|paralizzat\w*"
+        r"|addormentat\w*|senza forza|non reggono|non si muovono)"
+        r"|\bnon (le )?sento (piu )?(le )?gambe|\bnon riesco (piu )?a muovere (le )?gambe"
+        r"|\b(loss of|losing|lost|no) (strength|feeling|power)[^.;!?]{0,15}\blegs?"
+        r"|\blegs?\b[^.;!?]{0,20}\b(weak\w*|giving (way|out)|numb|gave (way|out)|won.?t move|collaps\w*)"
+        r"|\bcan.?t (feel|move) my legs"
+    ),
+)
+# A red flag the citizen says they do NOT have: "nessun dolore al petto, solo palpitazioni".
+_NEGATION = re.compile(
+    r"\b(non|no|nessun\w*|senza|niente|mai|without|not|never|don.?t|didn.?t|zero)\b[^.;!?]{0,22}$"
+)
+
+
+def _red_flag(text: str) -> bool:
+    folded = _fold(text)
+    if any(flag in folded for flag in _RED_FLAGS):
+        start = min(folded.find(flag) for flag in _RED_FLAGS if flag in folded)
+        if not _NEGATION.search(folded[max(0, start - 30) : start]):
+            return True
+    for pattern in _RED_FLAG_PATTERNS:
+        for hit in pattern.finditer(folded):
+            before = folded[max(0, hit.start() - 30) : hit.start()]
+            if not _NEGATION.search(before):
+                return True
+    return False
+
+
 def _emergency(message: Message) -> bool:
     if understood(message).body.get("is_emergency") is True:
         return True
-    lowered = message.text.lower()
-    return any(flag in lowered for flag in _RED_FLAGS)
+    return _red_flag(message.text)
 
 
 def _plain(text: str) -> str:
@@ -473,12 +620,12 @@ _PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
             r" (mal|male|dolor\w*|fitt\w*) (di|alla|della|nella) schien| schien\w*"
             r"| lomba\w*| colpo della strega| sciatic\w*| mal di reni| reni bloccat"
             r"| back (pain|ache|hurts|is killing|problem)| backache| my back| lower back| spine"
-            r"| espalda| dos bloque"
+            r"| espalda| dos bloque| mal au dos| douleur\w* (au|du|dans le) dos| dolor de espalda"
         ),
     ),
     (
         "SYM-KNEE",
-        re.compile(r" ginoc+h?i\w*| ginoch\w*| rotul\w*| menisc\w*| knee\w*| rodilla| genou"),
+        re.compile(r" ginoc+h?i\w*| ginoch\w*| rotul\w*| menisc\w*| knee\w*| rodilla\w*| genou\w*"),
     ),
     (
         "SYM-PALPITATIONS",
@@ -489,6 +636,7 @@ _PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
             r"| (batt\w*|accelera\w*|martell\w*|corre\w*) .{0,25}\bcuore"
             r"| heart\b.{0,30}\b(racing|races|pounding|pounds|beating fast|beats fast|fluttering"
             r"|skipping|jumping|going crazy)| racing heart| heart palpitation| corazon"
+            r"| coeur\b.{0,25}\b(bat\w*|vite|fort|emball\w*)"
         ),
     ),
     (
@@ -570,15 +718,7 @@ async def _llm_symptom(city: City, text: str, need_id: str | None) -> str | None
 def _clarify(text: str) -> str:
     """Layer 3: never leave the citizen without an answer."""
 
-    if _english(text):
-        return (
-            "Thank you for writing. To help you in the right way, could you tell me in a "
-            "few words what you feel and where: for example back, knee, or a racing heart?"
-        )
-    return (
-        "Grazie per averci scritto. Per aiutarla nel modo giusto, può dirmi in poche "
-        "parole cosa sente e dove? Per esempio schiena, ginocchio o cuore che batte forte."
-    )
+    return _line("clarify", text)
 
 
 def _our_rx(chat: list[Message], agent: str) -> dict[str, str]:
@@ -601,6 +741,17 @@ async def _gp(city: City, message: Message, chat: list[Message]) -> None:
             await _say(city, message.sender, _escalation(message.text))
         return
     code = _symptom(message)
+    raw_old = (
+        fields_of(message.text).get("prescription_number")
+        or understood(message).body.get("prescription_number")
+        or (message.body or {}).get("prescription_number")
+        or ""
+    )
+    old = raw_old if isinstance(raw_old, str) else ""
+    if code is None and old and not _keyword_symptom(message.text):
+        # Rule P1: an expired prescription comes back with only its number. Renew it.
+        if await _renew(city, message, chat, old):
+            return
     if code is None:
         # The citizen may have answered our question: read every line they wrote in this case.
         said = " ".join(
@@ -640,8 +791,110 @@ async def _gp(city: City, message: Message, chat: list[Message]) -> None:
     )
 
 
+def _fresh_rx(need_id: str | None, msg_id: str, tag: str) -> str:
+    """A new prescription number for this case, distinct from the first one (renewal, retry)."""
+
+    base = _rx(need_id, msg_id).removeprefix("prescription_number-")
+    mark = "".join(ch for ch in msg_id.upper() if ch.isalnum())[-4:] or "0000"
+    number = f"prescription_number-{base[:32]}-{tag}{mark}"
+    return number if _RX.fullmatch(number) else f"prescription_number-{tag}{mark}-CASE"
+
+
+_KNOWN = {procedure for procedure, _ in _PROTOCOLS.values()} | {"CTRL-CARD"}
+
+
+async def _renew(city: City, message: Message, chat: list[Message], old: str) -> bool:
+    """Read the old prescription on the Ledger, then prescribe the same care with a new number."""
+
+    agent = city.agent_id
+    citizen = message.sender
+    token = f"prescription_number={old}"
+    if not _we(chat, agent, token, to=LEDGER, word="prescription"):
+        if not await _say(city, LEDGER, f"prescription {token}"):
+            return False
+    found = await _await_line(city, message.need_id, chat, "prescription", token, op="prescription")
+    if found is None:
+        # The Ledger's answer opens its own turn; _announce finishes the renewal there.
+        return True
+    if first_word(found[0].text) != "prescription":
+        return False
+    reply, fresh = found
+    return await _renew_from(city, message, fresh, citizen, old, reply.text)
+
+
+async def _renew_from(
+    city: City, message: Message, fresh: list[Message], citizen: str, old: str, ledger_text: str
+) -> bool:
+    agent = city.agent_id
+    fields = fields_of(ledger_text)
+    procedure = fields.get("procedure", "")
+    priority = fields.get("priority", "")
+    if procedure not in _KNOWN or priority not in {"U", "B", "D", "P"}:
+        return False
+    if any(row.sender == agent and f"renewal_of={old}" in row.text.split() for row in fresh):
+        return True
+    said = next((row.text for row in fresh if row.sender == citizen), message.text)
+    number = _fresh_rx(message.need_id, message.msg_id, "R")
+    new = f"prescription_number={number}"
+    if not _we(fresh, agent, new, to=LEDGER, word="prescribe"):
+        if not await _say(
+            city,
+            LEDGER,
+            f"prescribe patient={citizen} procedure={procedure} priority={priority} {new} renewal_of={old}",
+        ):
+            return False
+    if not _we(fresh, agent, new, to=citizen, word="prescription"):
+        await _say(
+            city,
+            citizen,
+            f"prescription {new} procedure={procedure} priority={priority} renewal_of={old} "
+            f"{_line('renewal', said)}",
+        )
+    return True
+
+
+async def _reissue(city: City, message: Message, chat: list[Message], agent: str) -> None:
+    """The Ledger refused our prescribe. Never resend the same request: issue one corrected
+    prescription with a new number and tell the citizen, so they do not hold a dead number."""
+
+    sent = [row for row in chat if row.sender == agent and row.recipient == LEDGER
+            and row.text.strip().startswith("prescribe ")]
+    if not sent or len(sent) >= 2:
+        return
+    first = fields_of(sent[0].text)
+    citizen = first.get("patient") or _citizen(chat)
+    procedure = first.get("procedure", "")
+    priority = first.get("priority", "")
+    if not citizen or procedure not in _KNOWN or priority not in {"U", "B", "D", "P"}:
+        return
+    number = _fresh_rx(message.need_id, message.msg_id, "B")
+    token = f"prescription_number={number}"
+    parts = [f"prescribe patient={citizen} procedure={procedure} priority={priority}", token]
+    if first.get("symptom_code"):
+        parts.append(f"symptom_code={first['symptom_code']}")
+    if not await _say(city, LEDGER, " ".join(parts)):
+        return
+    said = next((row.text for row in chat if row.sender == citizen), "")
+    await _say(
+        city,
+        citizen,
+        f"prescription {token} procedure={procedure} priority={priority} {_line('retry', said)}",
+    )
+
+
 async def _announce(city: City, message: Message, chat: list[Message], agent: str) -> None:
     head = first_word(message.text)
+    if head == "prescription":
+        # The Ledger answered our lookup of an old number: finish the renewal (rule P1).
+        old = fields_of(message.text).get("prescription_number", "")
+        asked = old and _we(chat, agent, f"prescription_number={old}", to=LEDGER, word="prescription")
+        citizen = _citizen(chat)
+        if asked and citizen:
+            await _renew_from(city, message, chat, citizen, old, message.text)
+        return
+    if head == "refused" and "DUPLICATE" not in message.text and "prescribe" in words(message.text):
+        await _reissue(city, message, chat, agent)
+        return
     if head == "refused" and "DUPLICATE" not in message.text:
         return
     if head not in {"prescribed", "refused"}:
