@@ -2853,7 +2853,9 @@ async def _on_confirm(
     agent = city.agent_id
     fields = fields_of(message.text)
     offer_id = fields.get("offer_id", "")
-    consent = fields.get("consent_ref", "")
+    # MACH-1: a partner sends consent_ref (booking) and cross_asst_consent_ref (rule P2).
+    cross_ref = fields.get("cross_asst_consent_ref", "")
+    consent = fields.get("consent_ref", "") or cross_ref
     offer = _our_offer(chat, agent, offer_id) if offer_id else {}
     slot = fields.get("slot_id") or offer.get("slot_id", "")
     facility = fields.get("facility") or offer.get("facility", "")
@@ -2901,6 +2903,8 @@ async def _on_confirm(
             f"booking_consent_ref={consent}",
             f"facility={facility or via}",
         ]
+        if cross:
+            parts.append(f"cross_asst_consent_ref={cross}")  # MACH-1
         if number:
             parts.append(f"prescription_number={number}")
         if not await _say(city, via, " ".join(parts)):
@@ -2913,7 +2917,10 @@ async def _on_confirm(
                 parts.append(f"citizen={citizen}")
             if number:
                 parts.append(f"prescription_number={number}")
-            parts.append(f"consent_ref={consent}")
+            # A hold for another ASST's citizen carries the cross-ASST consent (rule P2).
+            parts.append(f"consent_ref={cross_ref or consent}")
+            if cross_ref:
+                parts.append(f"cross_asst_consent_ref={cross_ref}")
             if not await _say(city, LEDGER, " ".join(parts)):
                 return
             _HELD[slot] = time.monotonic()
@@ -3518,7 +3525,16 @@ async def _on_committed(city: City, message: Message, chat: list[Message]) -> No
     token = f"booking_id={booking_id}"
     if _we(chat, city.agent_id, token, to=target, word="booking.receipt"):
         return
-    await _say(city, target, f"booking.receipt booking_id={booking_id} ledger_ref={ledger_ref}")
+    extra = ""
+    if target.startswith("agent:") and slot:
+        # MACH-1: a partner's booking centre matches the receipt to its offer.
+        offer_id = ""
+        for row in chat:
+            for line in row.text.splitlines():
+                if f"slot_id={slot}" in line.split():
+                    offer_id = fields_of(line).get("offer_id", offer_id)
+        extra = f" slot_id={slot}" + (f" offer_id={offer_id}" if offer_id else "")
+    await _say(city, target, f"booking.receipt booking_id={booking_id} ledger_ref={ledger_ref}{extra}")
 
 
 async def _on_refused(
@@ -3546,7 +3562,7 @@ async def _on_refused(
         code = re.search(r"\b[A-Z][A-Z_]{3,}\b", message.text)
         extra = f" code={code.group(0)}" if code else ""
         # Reasons agreed on Discord: a P2 refusal is rule_p2_no_consent for every team.
-        reason = "rule_p2_no_consent" if code and code.group(0) == "CONSENT_MISSING" else "facility_cancelled"
+        reason = "rule_p2_no_consent" if code and code.group(0) == "CONSENT_MISSING" else "hold_refused"
         await _say(city, target, f"cancel offer_id={offer_id} reason={reason}{extra}")
         # A partner ASST's booking centre loses its citizen if it has to start over: offer the
         # next free slots of ours at once (not for a refusal another slot cannot fix).
