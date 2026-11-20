@@ -562,7 +562,7 @@ def fitting(
         free = slot.get("free")
         if free is not None and free.isdigit() and int(free) <= 0:
             continue
-        reserve = slot.get("urgent_reserve", "").lower() == "true"
+        reserve = _reserved(slot)
         if reserve and priority != "U":
             continue
         if not earliest < at or (horizon is not None and at >= horizon):
@@ -1276,6 +1276,17 @@ _DESK_SAY: dict[str, dict[str, str]] = {
         "en": "For your follow-up heart check, here is the new prescription number: you can "
         "book it at the booking centre whenever you like.",
     },
+    "consent": {
+        "it": "Ottima scelta. Per completare la prenotazione mi serve il suo consenso al "
+        "trattamento dei dati per questa visita: me lo conferma?",
+        "en": "Good choice. To complete the booking I need your agreement to use your data for "
+        "this visit: do you agree?",
+    },
+    "choose": {
+        "it": "Ecco di nuovo gli orari disponibili: per sceglierne uno, mi risponda indicando il "
+        "suo codice (offer_id).",
+        "en": "Here are the available times again: to choose one, reply with its code (offer_id).",
+    },
     "receipt": {
         "it": "Prenotazione confermata. Porti con sé la tessera sanitaria e arrivi qualche "
         "minuto prima. Se può, usi i mezzi pubblici: si evita il traffico e si inquina meno.",
@@ -1354,6 +1365,23 @@ async def _desk(
         # A partner ASST answered our availability request: the cross-ASST turn handles it.
         await _advance(city, message, chat, fixed=fixed, replacing=False)
         return
+    if message.sender.startswith("citizen:"):
+        pending = _pending_booking_consent(chat, city.agent_id, message)
+        if pending:
+            # The citizen answered our booking-consent question: book the offer they chose.
+            consent = fields_of(message.text).get("consent_ref", "")
+            if consent:
+                chosen = Message(
+                    type=message.type,
+                    sender=message.sender,
+                    msg_id=message.msg_id,
+                    need_id=message.need_id,
+                    conversation_id=message.conversation_id,
+                    body={"text": f"confirm offer_id={pending} consent_ref={consent}"},
+                    recipient=message.recipient,
+                )
+                await _on_confirm(city, chosen, chat, hold_self=hold_self)
+                return
     if message.sender == LEDGER or message.sender.startswith("citizen:"):
         await _advance(city, message, chat, fixed=fixed, replacing=False)
 
@@ -1533,11 +1561,8 @@ async def _advance_alone(
     days = _days(chat)
     best = [s for s in fitting(lines, gender=_gender(chat), **common) if usable(s)]
     preferred = [s for s in best if not days or s.get("day", "") in days]
-    chosen: list[dict[str, str]] = []
-    for pool in (preferred, best, [s for s in fitting(lines, gender=None, **common) if usable(s)]):
-        for slot in pool:
-            if slot not in chosen and len(chosen) < 3:
-                chosen.append(slot)
+    relaxed = [s for s in fitting(lines, gender=None, **common) if usable(s)]
+    chosen = _diverse((preferred, best, relaxed), 3)
     if chosen:
         text = "\n".join(_offer_line(slot, number, priority) for slot in chosen)
         if await _say(city, citizen, f"{text}\n{_desk_line('offers', chat)}"):
@@ -1547,6 +1572,10 @@ async def _advance_alone(
                     sent.again.add(slot["slot_id"])
         return
     if taken and not replacing:
+        # The citizen wrote in plain words after our offers ("va bene martedì"): never silent,
+        # show the options again and how to choose.
+        if message.sender == citizen and not _answered(chat, agent, message):
+            await _offers_again(city, chat, message)
         return
     page, pages = _page(world)
     if page < pages and page < _MAX_PAGE and not _asked(chat, agent, procedure, page + 1):
@@ -1555,6 +1584,75 @@ async def _advance_alone(
     # Nothing fits in our ASST: try a partner of the ring (with consent), else the waiting list.
     own = {fields_of(line).get("facility", "") for line in lines} | {agent}
     await _go_partner(city, chat, citizen, procedure, priority, number, own, message.need_id)
+
+
+def _diverse(pools: tuple[list[dict[str, str]], ...], limit: int) -> list[dict[str, str]]:
+    """Up to ``limit`` slots, best pool first, spread over different doctors and days: the
+    citizen's unspoken preferences (day, doctor gender) are then more likely to be covered,
+    which turns a +1 booking into a +2."""
+
+    ordered: list[dict[str, str]] = []
+    for pool in pools:
+        for slot in pool:
+            if slot not in ordered:
+                ordered.append(slot)
+    chosen: list[dict[str, str]] = []
+    for rule in ("doctor+day", "doctor", "day", "any"):
+        for slot in ordered:
+            if len(chosen) >= limit or slot in chosen:
+                continue
+            doctors = {s.get("doctor_id") for s in chosen}
+            days = {s.get("day") for s in chosen}
+            new_doc = slot.get("doctor_id") not in doctors
+            new_day = slot.get("day") not in days
+            if (rule == "doctor+day" and new_doc and new_day) or (rule == "doctor" and new_doc) \
+                    or (rule == "day" and new_day) or rule == "any":
+                chosen.append(slot)
+    # Keep time order inside the message, earliest first.
+    return sorted(chosen, key=lambda s: (s.get("at", ""), s.get("slot_id", "")))
+
+
+def _reserved(slot: dict[str, str]) -> bool:
+    """Rule P3: is this slot in the urgent reserve? The field name is not documented, so any
+    reserve-like field with a reserve-like value counts (urgent_reserve=true, reserve=U, ...)."""
+
+    for key, value in slot.items():
+        name = key.lower()
+        if "reserv" in name or "riserv" in name or name in {"urgent", "urgente"}:
+            if value.strip().lower() in {"true", "1", "yes", "u", "urgent", "urgente", "si", "sì"}:
+                return True
+    return False
+
+
+async def _offers_again(city: City, chat: list[Message], message: Message) -> None:
+    """Send the citizen our current offers again, with how to choose."""
+
+    agent = city.agent_id
+    latest = ""
+    for row in chat:
+        if row.sender == agent and row.recipient == message.sender and _offers_in(row.text):
+            latest = row.text
+    offers = _offers_in(latest)
+    if not offers:
+        return
+    lines = [
+        "offer " + " ".join(f"{k}={v}" for k, v in offer.items())
+        for offer in offers
+    ]
+    await _say(city, message.sender, "\n".join(lines) + "\n" + _desk_line("choose", chat))
+
+
+def _pending_booking_consent(chat: list[Message], agent: str, message: Message) -> str:
+    """The offer we asked a booking consent for, if the citizen has not been booked yet."""
+
+    for row in reversed(chat):
+        if row.sender == agent and row.recipient == message.sender and "purpose=booking" in row.text.split() \
+                and first_word(row.text) == "consent":
+            offer_id = fields_of(row.text).get("offer_id", "")
+            if offer_id and not _we(chat, agent, f"offer_id={offer_id}", to=message.sender, word="booking.receipt"):
+                return offer_id
+            return ""
+    return ""
 
 
 _PREFETCH = ("VIS-FIS", "VIS-CARD")
@@ -1804,6 +1902,21 @@ async def _on_confirm(
     offer = _our_offer(chat, agent, offer_id) if offer_id else {}
     slot = fields.get("slot_id") or offer.get("slot_id", "")
     facility = fields.get("facility") or offer.get("facility", "")
+    from_citizen = message.sender.startswith("citizen:")
+    if from_citizen and (not slot or (offer_id and not offer and not fields.get("slot_id"))):
+        # Fix 2: an offer we never sent (typo, old message): show the valid options again.
+        await _offers_again(city, chat, message)
+        return
+    if from_citizen and slot and not consent:
+        # Fix 1: the choice is clear but the booking consent is missing: ask for it, once.
+        oid = offer_id or offer.get("offer_id", "") or f"of-{slot}"
+        if not _we(chat, agent, f"offer_id={oid}", to=message.sender, word="consent"):
+            await _say(
+                city,
+                message.sender,
+                f"consent purpose=booking offer_id={oid} slot_id={slot} " + _desk_line("consent", chat),
+            )
+        return
     if not slot or not consent:
         return
     citizen = fields.get("citizen") or (
