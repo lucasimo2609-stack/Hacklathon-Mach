@@ -72,6 +72,7 @@ $PY -I tests/bc_offers.py booking_centre/agent tests/bc_test.py  # up to 5 offer
 $PY -I tests/bc_clock.py booking_centre/agent tests/bc_test.py   # fresh clock, no cancel loop
 $PY -I tests/bc_cross.py booking_centre/agent tests/bc_test.py   # partner offers in ONE message
 $PY -I tests/bc_pages.py booking_centre/agent tests/bc_test.py   # all world pages read in one turn
+$PY -I tests/theme.py booking_centre/agent tests/bc_test.py      # readable dates, tone, receipt, old car
 $PY -I tests/sp_test.py specialist/agent
 $PY -I tests/sp_flow.py specialist/agent     # report consent, silence, GP care.update
 $PY -I tests/h_test.py hospital/agent hospital

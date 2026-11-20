@@ -148,7 +148,8 @@ _EN_WORDS = frozenset(
      # everyday words Italian never uses: "I'm writing for my mother… can't drive" was read as Italian
      "is", "and", "she", "he", "her", "his", "for", "you", "your", "with", "years", "old", "hurts",
      "writing", "am", "i'm", "can't", "don't", "want", "book", "it's", "what", "where", "when", "help",
-     "to", "all", "of", "this", "that", "be", "get", "set"}
+     "to", "all", "of", "this", "that", "be", "get", "set",
+     "back", "too", "busy", "quick", "knee", "heart", "racing", "appointment", "visit"}
 )
 
 
@@ -324,13 +325,25 @@ def _refusal(text: str, lang: str = "") -> str:
     return _REFUSE.get(lang or _speaks_as(text), _REFUSE["en"])
 
 
+_RX_BRIEF = {
+    "it": "Con questo numero prenoti al centro prenotazioni.",
+    "en": "Book at the booking centre with this number.",
+    "es": "Reserve en el centro de reservas con este número.",
+    "fr": "Réservez au centre de réservation avec ce numéro.",
+    "ka": "ამ ნომრით დაჯავშნეთ ჯავშნის ცენტრში.",
+}
+
+
 def _rx_note(text: str, priority: str = "", needs: tuple[str, ...] = ()) -> str:
     """Next step, kind and practical, after the protocol tokens. No diagnosis, no dose.
     Proactive: when to book for this priority, what to bring, and the citizen's own needs
     (already passed to the booking centre)."""
 
     lang = _speaks_as(text)
-    note = _line("rx", text)
+    tone = _tone(text)
+    note = _RX_BRIEF.get(lang, _RX_BRIEF["en"]) if tone == "curt" else _line("rx", text)
+    if tone == "anxious":
+        note = f"{_CALM.get(lang, _CALM['en'])} {note}"
     if _injection(text):
         note = f"{_refusal(text)} {note}"
     hint = _PRIO_HINT.get(lang, _PRIO_HINT["en"]).get(priority, "")
@@ -365,6 +378,10 @@ _NEED_PATTERNS: tuple[tuple[str, str], ...] = (
     ("elderly", r"\banzian[oa]\b|\belderly\b|\b(7[5-9]|[89]\d|1[01]\d) ?(anni|years|ans|anos)\b"),
     ("interpreter", r"interpret|non parlo (bene )?(l.)?italiano|don.?t speak italian"
      r"|no hablo italiano|je ne parle pas italien|parlo solo|speak only|only speak"),
+    ("cognitive", r"difficolta a capire|faccio fatica a capire|problemi di memoria|perdo la memoria"
+     r"|\bconfus[oa]\b|alzheimer|demenz|cognitiv|disabilita intellettiva|hard to understand"
+     r"|memory (problem|loss)|dementia|learning disabilit|get confused|problemas de memoria"
+     r"|troubles de la memoire"),
     ("soonest", r"di fretta|in a hurry|il prima possibile|al piu presto|as soon as possible"
      r"|\basap\b|urgentemente|lo antes posible|au plus vite"),
 )
@@ -376,12 +393,20 @@ _NEED_ORDER = tuple(key for key, _ in _NEED_PATTERNS)
 _NEED_RES = tuple((key, re.compile(pattern)) for key, pattern in _NEED_PATTERNS)
 
 
+# Kit citizen profile: disability=motor|visual|hearing|cognitive (given when we name the field).
+_PROFILE_NEED = {"motor": "wheelchair", "visual": "sight", "hearing": "hearing", "cognitive": "cognitive"}
+# Only these leave the agent the citizen told: disability is never repeated to another agent.
+_SHAREABLE = frozenset({"interpreter", "soonest", "transport", "caregiver"})
+
+
 def _needs(text: str) -> tuple[str, ...]:
     """The citizen's access and mobility needs, in a fixed order; a negated mention
     ("non ho bisogno dell'interprete") does not count."""
 
     folded = _fold(text)
     found: list[str] = []
+    for raw in re.findall(r"\bdisability=([a-z,+|]+)", folded):
+        found += [_PROFILE_NEED[k] for k in re.split(r"[,+|]", raw) if k in _PROFILE_NEED]
     for key, pattern in _NEED_RES:
         for match in pattern.finditer(folded):
             before = folded[max(0, match.start() - 40):match.start()]
@@ -399,6 +424,7 @@ _NEED_LABEL: dict[str, dict[str, str]] = {
         "sight": "messaggi brevi e chiari, da leggere anche con un lettore vocale",
         "caregiver": "la persona che lei accompagna può venire insieme a lei",
         "elderly": "un'attenzione particolare per una persona anziana",
+        "cognitive": "parole semplici, un passo alla volta",
         "interpreter": "un interprete o un medico che parli la sua lingua",
         "soonest": "il primo orario disponibile per la sua priorità",
     },
@@ -409,6 +435,7 @@ _NEED_LABEL: dict[str, dict[str, str]] = {
         "sight": "short, clear messages that work with a screen reader",
         "caregiver": "the person you look after can come with you",
         "elderly": "extra care for an older person",
+        "cognitive": "simple words, one step at a time",
         "interpreter": "an interpreter or a doctor who speaks your language",
         "soonest": "the earliest time available for your priority",
     },
@@ -419,6 +446,7 @@ _NEED_LABEL: dict[str, dict[str, str]] = {
         "sight": "mensajes breves y claros, aptos para lector de pantalla",
         "caregiver": "la persona a la que acompaña puede venir con usted",
         "elderly": "una atención especial para una persona mayor",
+        "cognitive": "palabras sencillas, paso a paso",
         "interpreter": "un intérprete o un médico que hable su idioma",
         "soonest": "el primer horario disponible para su prioridad",
     },
@@ -429,6 +457,7 @@ _NEED_LABEL: dict[str, dict[str, str]] = {
         "sight": "des messages courts et clairs, lisibles par un lecteur d'écran",
         "caregiver": "la personne que vous accompagnez peut venir avec vous",
         "elderly": "une attention particulière pour une personne âgée",
+        "cognitive": "des mots simples, une étape à la fois",
         "interpreter": "un interprète ou un médecin qui parle votre langue",
         "soonest": "le premier horaire disponible pour votre priorité",
     },
@@ -440,10 +469,20 @@ _NEEDS_TOLD = {
     "fr": "J'ai déjà prévenu le centre de réservation de vos besoins : {items}.",
 }
 _NEEDS_NOTED = {  # booking centre, in its offer message
-    "it": "Il medico di base ci ha segnalato: {items}. Lo indichiamo alla struttura con la prenotazione.",
-    "en": "Your GP told us about: {items}. We pass it to the facility with your booking.",
-    "es": "Su médico de cabecera nos indicó: {items}. Lo comunicamos al centro con la reserva.",
-    "fr": "Votre médecin nous a signalé : {items}. Nous le transmettons à la structure avec la réservation.",
+    "it": "Ho preso nota delle sue esigenze: {items}.",
+    "en": "I have noted your needs: {items}.",
+    "es": "He tomado nota de sus necesidades: {items}.",
+    "fr": "J'ai noté vos besoins : {items}.",
+}
+_NEEDS_PRIVATE = {  # GP: health details stay with the GP
+    "it": "Per riservatezza non inoltro dati sulla salute: se vuole, lo dica direttamente al "
+    "centro prenotazioni ({items}) e ne terranno conto.",
+    "en": "For your privacy I do not forward health details: if you like, tell the booking "
+    "centre directly ({items}) and they will take it into account.",
+    "es": "Por su privacidad no reenvío datos de salud: si quiere, dígalo directamente al "
+    "centro de reservas ({items}) y lo tendrán en cuenta.",
+    "fr": "Pour votre confidentialité je ne transmets pas de données de santé : si vous le "
+    "souhaitez, dites-le directement au centre de réservation ({items}).",
 }
 _NEEDS_READY = {  # facility, at check-in
     "it": "Il personale è già informato delle sue esigenze: {items}.",
@@ -483,7 +522,14 @@ def _need_items(needs: tuple[str, ...] | list[str], lang: str) -> str:
 
 
 def _needs_line(needs: tuple[str, ...], lang: str) -> str:
-    return _NEEDS_TOLD.get(lang, _NEEDS_TOLD["en"]).format(items=_need_items(needs, lang))
+    shared = [key for key in needs if key in _SHAREABLE]
+    private = [key for key in needs if key not in _SHAREABLE]
+    parts = []
+    if shared:
+        parts.append(_NEEDS_TOLD.get(lang, _NEEDS_TOLD["en"]).format(items=_need_items(shared, lang)))
+    if private:
+        parts.append(_NEEDS_PRIVATE.get(lang, _NEEDS_PRIVATE["en"]).format(items=_need_items(private, lang)))
+    return " ".join(parts)
 
 
 def _notice_needs(chat: list[Message], number: str | None = None) -> tuple[str, ...]:
@@ -496,17 +542,83 @@ def _notice_needs(chat: list[Message], number: str | None = None) -> tuple[str, 
         if number and fields.get("prescription_number") not in (None, number):
             continue
         raw = fields.get("needs", "")
-        return tuple(key for key in re.split(r"[+,]", raw) if key in _NEED_ORDER)
+        return tuple(key for key in re.split(r"[+,]", raw) if key in _SHAREABLE)
     return ()
 
 
+def _citizen_needs(chat: list[Message], number: str | None = None) -> tuple[str, ...]:
+    """What THIS agent knows: the citizen's own words to it, plus the GP's shareable hints."""
+
+    said = " ".join(row.text for row in chat if row.sender.startswith("citizen:"))
+    found = set(_needs(said)) | set(_notice_needs(chat, number))
+    return tuple(key for key in _NEED_ORDER if key in found)
+
+
 def _offer_needs(chat: list[Message]) -> str:
-    needs = _notice_needs(chat, _number(chat))
+    needs = _citizen_needs(chat, _number(chat))
     if not needs:
         return ""
     lang = _lang(chat)
     lang = lang if lang in _NEEDS_NOTED else "en"
     return " " + _NEEDS_NOTED[lang].format(items=_need_items(needs, lang))
+
+
+_ANXIOUS = re.compile(
+    r"preoccup|\bansi[ao]|paura|spavent|agitat|terrorizz|\bworr|anxious|scared|afraid|nervous"
+    r"|panic|frighten|asustad|preocupad|miedo|inquiet|\bpeur\b|angoiss"
+)
+_CURT = re.compile(
+    r"di fretta|ho fretta|in a hurry|\bquick(ly)?\b|\bfast\b|\bveloce|\bsubito\b|sbrigat"
+    r"|too busy|no time|non ho tempo|\brapid|deprisa|vite\b"
+)
+
+
+def _tone(text: str) -> str:
+    folded = _fold(text)
+    if _ANXIOUS.search(folded):
+        return "anxious"
+    if _CURT.search(folded):
+        return "curt"
+    return ""
+
+
+_CALM = {
+    "it": "Capisco la preoccupazione: è normale, ci pensiamo noi, un passo alla volta.",
+    "en": "I understand you are worried: that is normal, we will take care of it step by step.",
+    "es": "Entiendo su preocupación: es normal, nos ocupamos nosotros paso a paso.",
+    "fr": "Je comprends votre inquiétude : c'est normal, nous nous en occupons pas à pas.",
+}
+_BRIEF_OFFERS = {
+    "it": "Scelga un orario: mi risponda con il suo codice.",
+    "en": "Pick a time: reply with its code.",
+    "es": "Elija un horario: responda con su código.",
+    "fr": "Choisissez un horaire : répondez avec son code.",
+}
+_SIMPLE_OFFERS = {
+    "it": "Scelga un orario. Mi scriva il codice. La aiuto io.",
+    "en": "Pick one time. Write me its code. I will help you.",
+    "es": "Elija una hora. Escríbame el código. Yo le ayudo.",
+    "fr": "Choisissez une heure. Écrivez-moi le code. Je vous aide.",
+}
+
+
+def _offers_text(chat: list[Message], message: Message) -> str:
+    """The sentence after the offer tokens: plain for a cognitive need, brief for a curt
+    citizen, reassuring for an anxious one, otherwise the usual line plus noted needs."""
+
+    lang = _lang(chat)
+    key = lang if lang in _CALM else "en"
+    needs = _citizen_needs(chat, _number(chat))
+    said = " ".join(row.text for row in chat if row.sender.startswith("citizen:"))
+    if "cognitive" in needs:
+        return _SIMPLE_OFFERS[key]
+    tone = _tone(said)
+    if tone == "curt":
+        return _BRIEF_OFFERS[key]
+    text = _desk_line("offers", chat) + _offer_needs(chat)
+    if tone == "anxious":
+        text = f"{_CALM[key]} {text}"
+    return text
 
 
 def _notice_lang(chat: list[Message]) -> str:
@@ -1171,16 +1283,18 @@ async def _gp(city: City, message: Message, chat: list[Message]) -> None:
             # A need said after the prescription ("e uso la carrozzina"): pass it on and say so.
             said = " ".join(row.text for row in chat if row.sender == message.sender) + " " + message.text
             needs = _needs(said)
-            new = [key for key in needs if key not in _noticed(chat, agent)]
+            before = _needs(" ".join(row.text for row in chat if row.sender == message.sender
+                                     and row.msg_id != message.msg_id))
+            new = [key for key in needs if key not in before]
             line = _line("next", message.text)
             if new:
-                line = f"{line} {_needs_line(needs, _speaks_as(message.text))}"
+                line = f"{line} {_needs_line(tuple(new), _speaks_as(message.text))}"
             await _say(
                 city,
                 message.sender,
                 f"prescription_number={served['prescription_number']} {line}",
             )
-            if new:
+            if any(key in _SHAREABLE and key not in _noticed(chat, agent) for key in new):
                 await _notify_booking(
                     city, chat, served["prescription_number"], served.get("procedure", ""),
                     served.get("priority", ""), said, needs,
@@ -1247,7 +1361,7 @@ async def _notify_booking(
     lang = _lang_asked(said) or _script_lang(said) or _speaks_as(said)
     text = (
         f"care.notice prescription_number={number} procedure={procedure} priority={priority} "
-        f"lang={lang} needs={'+'.join(needs) or 'none'} "
+        f"lang={lang} needs={'+'.join(k for k in needs if k in _SHAREABLE) or 'none'} "
         "Nuova ricetta dal medico di base: il cittadino verrà a prenotare, con le esigenze indicate."
     )
     await _say(city, _BC_AGENT, text)
@@ -1819,6 +1933,49 @@ def _gender_in_words(text: str) -> str | None:
     return None
 
 
+_DAY_NAMES = {
+    "it": ["lunedì", "martedì", "mercoledì", "giovedì", "venerdì", "sabato", "domenica"],
+    "en": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"],
+    "es": ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"],
+    "fr": ["lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche"],
+}
+_MONTHS = {
+    "it": ["gennaio", "febbraio", "marzo", "aprile", "maggio", "giugno", "luglio", "agosto",
+           "settembre", "ottobre", "novembre", "dicembre"],
+    "en": ["January", "February", "March", "April", "May", "June", "July", "August",
+           "September", "October", "November", "December"],
+    "es": ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto",
+           "septiembre", "octubre", "noviembre", "diciembre"],
+    "fr": ["janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août",
+           "septembre", "octobre", "novembre", "décembre"],
+}
+_TIMES_HEAD = {"it": "Orari: {items}.", "en": "Times: {items}.", "es": "Horarios: {items}.", "fr": "Horaires : {items}."}
+_AT = {"it": "ore", "en": "at", "es": "a las", "fr": "à"}
+
+
+def _human_when(value: str, lang: str) -> str:
+    when = _when(value)
+    if when is None:
+        return ""
+    lang = lang if lang in _DAY_NAMES else "en"
+    day = _DAY_NAMES[lang][when.weekday()]
+    month = _MONTHS[lang][when.month - 1]
+    if lang == "en":
+        return f"{day} {when.day} {month} {_AT[lang]} {when:%H:%M}"
+    return f"{day} {when.day} {month} {_AT[lang]} {when:%H:%M}"
+
+
+def _human_times(values: list[str], chat: list[Message]) -> str:
+    """One readable line for all the times in the message: "Orari: 1) lunedì 16 novembre ore 10:30; …"."""
+
+    lang = _lang(chat)
+    lang = lang if lang in _DAY_NAMES else "en"
+    items = [f"{i}) {_human_when(v, lang)}" for i, v in enumerate(values, 1) if _human_when(v, lang)]
+    if not items:
+        return ""
+    return _TIMES_HEAD[lang].format(items="; ".join(items)) + " "
+
+
 def _offer_line(slot: dict[str, str], number: str | None, priority: str | None) -> str:
     parts = [
         "offer",
@@ -2023,9 +2180,9 @@ _DESK_SAY: dict[str, dict[str, str]] = {
     },
     "follow": {
         "it": "Per il controllo cardiologico successivo ecco la nuova ricetta: può prenotarla "
-        "dal centro prenotazioni quando vuole.",
+        "dal centro prenotazioni quando vuole, qui nella stessa struttura, così evita viaggi in più.",
         "en": "For your follow-up heart check, here is the new prescription number: you can "
-        "book it at the booking centre whenever you like.",
+        "book it at the booking centre whenever you like, here at the same facility, so no extra trips.",
     },
     "consent": {
         "it": "Ottima scelta. Per completare la prenotazione mi serve il suo consenso al "
@@ -2396,7 +2553,8 @@ async def _advance_alone(
         return
     if chosen:
         text = "\n".join(_offer_line(slot, number, priority) for slot in chosen)
-        if await _say(city, citizen, f"{text}\n{_desk_line('offers', chat)}{_offer_needs(chat)}"):
+        human = _human_times([slot["at"] for slot in chosen], chat)
+        if await _say(city, citizen, f"{text}\n{human}{_offers_text(chat, message)}"):
             for slot in chosen:
                 sent.offers.add(slot["slot_id"])
                 if replacing:
@@ -2906,7 +3064,8 @@ async def _cross_turn(city: City, message: Message, chat: list[Message], citizen
         parts.append(f"via={sender}")
         parts.append(f"cross_asst_consent_ref={consent}")
         lines.append(" ".join(parts))
-    await _say(city, citizen, "\n".join(lines) + "\n" + _desk_line("offers", chat) + _offer_needs(chat))
+    human = _human_times([offer.get("agenda_date") or offer.get("at") or "" for _, offer in fresh], chat)
+    await _say(city, citizen, "\n".join(lines) + "\n" + human + _offers_text(chat, message))
 
 
 async def _on_confirm(
@@ -3002,11 +3161,6 @@ async def _on_confirm(
     ]
     if number:
         parts.append(f"prescription_number={number}")
-    needs = _notice_needs(chat, number)
-    if needs and facility in _TEAM:
-        # Our own facility learns the access needs with the booking (never a partner ASST:
-        # cross-ASST data stays the minimum the citizen agreed to).
-        parts.append(f"access_needs={'+'.join(needs)}")
     if not await _say(city, facility, " ".join(parts)):
         # TARGET_NOT_VISIBLE: the hospital is down. No retry of a 4xx: tell the citizen and
         # offer what is still reachable.
@@ -3030,6 +3184,64 @@ async def _facility_down(
     await _advance(city, message, chat, fixed=None, replacing=True)
 
 
+_WINDOW = {
+    "it": "Si presenti allo sportello tra le {w} (ora dell'agenda) con la tessera sanitaria e il "
+    "codice della prenotazione. Tutto è digitale e registrato: nessun foglio da stampare.",
+    "en": "Come to the desk between {w} (agenda time) with your health card and booking code. "
+    "Everything is digital and recorded: nothing to print.",
+    "es": "Preséntese en el mostrador entre las {w} (hora de la agenda) con su tarjeta sanitaria y "
+    "el código de la reserva. Todo es digital: nada que imprimir.",
+    "fr": "Présentez-vous à l'accueil entre {w} (heure de l'agenda) avec votre carte vitale et le "
+    "code de réservation. Tout est numérique : rien à imprimer.",
+}
+_OLD_CAR = {
+    "it": "Un consiglio, se le è comodo: con un'auto EURO 0-4 conviene il trasporto pubblico, "
+    "si inquina meno e non si cerca parcheggio.",
+    "en": "A suggestion, only if it suits you: with an EURO 0-4 car, public transport means "
+    "less pollution and no parking to find.",
+    "es": "Un consejo, solo si le viene bien: con un coche EURO 0-4 conviene el transporte "
+    "público, contamina menos.",
+    "fr": "Un conseil, seulement si cela vous convient : avec une voiture EURO 0-4, les "
+    "transports en commun polluent moins.",
+}
+
+
+def _old_car(chat: list[Message]) -> bool:
+    for row in chat:
+        if not row.sender.startswith("citizen:"):
+            continue
+        folded = _fold(row.text)
+        euro = fields_of(row.text).get("car_euro_class", "") or (
+            (re.search(r"\beuro[ -]?([0-4])\b", folded) or [None, ""])[1]
+            if re.search(r"\b(auto|macchina|car|coche|voiture)\b", folded) else ""
+        )
+        if re.fullmatch(r"(?i)(euro-?)?[0-4]", euro or ""):
+            return True
+    return False
+
+
+def _receipt_extra(chat: list[Message], agent: str) -> str:
+    """Practical directions after the receipt: the half-day window of the booked slot, what to
+    bring, paperless; a gentle public-transport tip for an old car."""
+
+    lang = _lang(chat)
+    key = lang if lang in _WINDOW else "en"
+    when = None
+    for row in reversed(chat):
+        if row.sender.startswith("citizen:") and "confirm" in words(row.text):
+            offer = _our_offer(chat, agent, fields_of(row.text).get("offer_id", ""))
+            when = _when(offer.get("agenda_date") or offer.get("at") or "")
+            if when is not None:
+                break
+    text = ""
+    if when is not None:
+        window = "08:00-13:00" if when.hour < 13 else "13:00-18:00"
+        text += " " + _WINDOW[key].format(w=window)
+    if _old_car(chat):
+        text += " " + _OLD_CAR[key]
+    return text
+
+
 async def _forward_receipt(city: City, message: Message, chat: list[Message]) -> None:
     fields = fields_of(message.text)
     booking_id = fields.get("booking_id", "")
@@ -3044,7 +3256,7 @@ async def _forward_receipt(city: City, message: Message, chat: list[Message]) ->
         city,
         citizen,
         f"booking.receipt booking_id={booking_id} ledger_ref={ledger_ref} "
-        + _desk_line("receipt", chat),
+        + _desk_line("receipt", chat) + _receipt_extra(chat, city.agent_id),
     )
 
 
@@ -3777,14 +3989,34 @@ async def _on_checked_in(
 
 
 def _ready_needs(chat: list[Message]) -> str:
-    for row in reversed(chat):
-        raw = fields_of(row.text).get("access_needs", "")
-        if raw and "confirm" in words(row.text):
-            needs = [key for key in re.split(r"[+,]", raw) if key in _NEED_ORDER]
-            lang = _lang(chat)
-            lang = lang if lang in _NEEDS_READY else "en"
-            return " " + _NEEDS_READY[lang].format(items=_need_items(needs, lang)) if needs else ""
-    return ""
+    """At the desk: the citizen's own words to this facility (never another agent's note)."""
+
+    said = " ".join(row.text for row in chat if row.sender.startswith("citizen:"))
+    needs = [key for key in _needs(said) if key in _DESK_HELP_KEYS]
+    if not needs:
+        return ""
+    lang = _lang(chat)
+    lang = lang if lang in _DESK_HELP else "en"
+    return " " + " ".join(_DESK_HELP[lang][key] for key in needs)
+
+
+_DESK_HELP_KEYS = ("wheelchair", "hearing", "sight", "cognitive", "caregiver")
+_DESK_HELP = {
+    "it": {
+        "wheelchair": "L'ingresso è senza barriere: il personale la accompagna.",
+        "hearing": "Le scriveremo tutto, senza chiamate a voce.",
+        "sight": "Il personale la accompagna fino all'ambulatorio.",
+        "cognitive": "Si sieda pure. La chiamiamo noi.",
+        "caregiver": "Chi la accompagna può restare con lei.",
+    },
+    "en": {
+        "wheelchair": "The entrance is step-free: our staff will walk with you.",
+        "hearing": "We will write everything down, no calling out names.",
+        "sight": "Our staff will take you to the room.",
+        "cognitive": "Please sit down. We will come and get you.",
+        "caregiver": "The person with you can stay with you.",
+    },
+}
 
 
 def _report_ref(need_id: str | None, booking_id: str) -> str:

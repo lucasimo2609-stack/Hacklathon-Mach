@@ -45,13 +45,14 @@ async def main():
     check("wheelchair: reply says when (priority B) and what to bring", rx and "priorità B" in rx[0] and "tessera" in rx[0])
     check("collaboration: one care.notice to booking", len(note) == 1, str(note))
     f = A.fields_of(note[0]) if note else {}
-    check("notice: needs + protocol + lang", f.get("needs") == "wheelchair" and f.get("procedure") == "VIS-FIS" and f.get("lang") == "it", str(f))
+    check("notice: protocol + lang, disability NOT forwarded", f.get("needs") == "none" and f.get("procedure") == "VIS-FIS" and f.get("lang") == "it", str(f))
+    check("privacy: reply says health details stay with the GP", rx and "Per riservatezza" in rx[0], rx[0] if rx else "")
     check("notice: no citizen id, no symptom (minimum data)", note and "citizen:" not in note[0] and "schiena" not in note[0])
 
     # GP 2: caregiver, elderly, no car, English
     c = G(); await gp(c, "I'm writing for my mother, she is 82 years old and can't drive. Her knee hurts a lot.")
     rx = c.to(GCIT, "prescription"); f = A.fields_of(c.to(BCID, "care.notice")[0])
-    check("caregiver: needs found", set(f.get("needs", "").split("+")) == {"caregiver", "elderly", "transport"}, str(f))
+    check("caregiver: only shareable needs forwarded (age stays)", set(f.get("needs", "").split("+")) == {"caregiver", "transport"}, str(f))
     check("caregiver: English reply with the needs", rx and "booking centre about your needs" in rx[0], rx[0][:200] if rx else "")
     check("caregiver: knee -> VIS-FIS/D", rx and "procedure=VIS-FIS priority=D" in rx[0])
 
@@ -60,9 +61,12 @@ async def main():
     last = [r.text for r in c.rows if r.sender == GPID and r.recipient == GCIT][-1]
     notes = c.to(BCID, "care.notice")
     check("late need: reply names it", "per iscritto" in last, last)
-    check("late need: booking told again", len(notes) == 2 and "needs=hearing" in notes[1], str(notes))
+    check("late need (health): not forwarded to booking", len(notes) == 1, str(notes))
+    await gp(c, "ah, e non ho la macchina")
+    notes = c.to(BCID, "care.notice")
+    check("late need (no car): booking told", len(notes) == 2 and "needs=transport" in notes[1], str(notes))
     await gp(c, "grazie")
-    check("late need: no third notice for a plain thanks", len(c.to(BCID, "care.notice")) == 2)
+    check("late need: no extra notice for a plain thanks", len(c.to(BCID, "care.notice")) == 2)
 
     # GP 4: negated need -> none
     c = G(); await gp(c, "Non ho bisogno dell'interprete, ho male al ginocchio")
@@ -97,17 +101,18 @@ async def main():
     m = c.add(GPID, BC, "care.notice prescription_number=rx-1 procedure=VIS-FIS priority=B lang=en needs=wheelchair+hearing Nuova ricetta")
     c.out.clear(); await A.handle("booking_centre", c, m, await c.history())
     check("booking: answers the GP", any(to == GPID for to, _ in c.out), str(c.out))
-    # BC 2: the citizen's offers name the needs, in the GP's language; our facility gets them
-    await turn(c, CIT, "hello, I want to book prescription_number=rx-1")
+    # BC 2: a disability in the GP's notice is ignored; the citizen's own words to booking count
+    await turn(c, CIT, "hello, I use a wheelchair and want to book prescription_number=rx-1")
     offer = [t for to, t in c.out if to == CIT and "offer " in t]
-    check("booking: offers name the needs", offer and "Your GP told us about" in offer[0] and "step-free" in offer[0], offer[0][-260:] if offer else "")
+    check("booking: offers note the citizen's own need", offer and "I have noted your needs" in offer[0] and "step-free" in offer[0], offer[0][-260:] if offer else "")
     A._TEAM = A._TEAM | {HOSP}
     await turn(c, CIT, "confirm offer_id=of-S2 consent_ref=cb-1")
     conf = [t for to, t in c.out if to == HOSP and t.startswith("confirm")]
-    check("booking: own facility gets access_needs", conf and "access_needs=wheelchair+hearing" in conf[0], str(conf))
-    # Facility: check-in welcome names the needs
-    chat = [Message(type="chat", sender=BC, msg_id="x", need_id="n", body={"text": conf[0] if conf else ""}, recipient=HOSP)]
-    check("facility: welcome names the needs", "carrozzina" in A._ready_needs(chat) or "step-free" in A._ready_needs(chat), A._ready_needs(chat))
+    check("privacy: facility confirm carries no disability", conf and "access_needs" not in conf[0] and "wheelchair" not in conf[0], str(conf))
+    A._TEAM = A._TEAM - {HOSP}
+    # Facility: the citizen's own words at the desk shape the welcome
+    chat = [Message(type="chat", sender=CIT, msg_id="x", need_id="n", body={"text": "checkin booking_id=B1, sono in carrozzina"}, recipient=HOSP)]
+    check("facility: welcome adapts to the citizen's own words", "senza barriere" in A._ready_needs(chat), A._ready_needs(chat))
     # BC 3: a partner facility never gets the needs
     A._TEAM = A._TEAM - {HOSP}
     c2 = FakeCity(slots=own); c2.add(GPID, BC, "care.notice prescription_number=rx-1 procedure=VIS-FIS priority=B lang=it needs=sight")
