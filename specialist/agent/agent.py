@@ -2805,7 +2805,9 @@ def _partner_offers(chat: list[Message], agent: str) -> list[tuple[str, dict[str
 def _partner_langs(offer: dict[str, str]) -> set[str] | None:
     """The doctor's languages when the partner says them (doctor_lang=it/ka), else None."""
 
-    raw = offer.get("doctor_lang") or offer.get("languages") or offer.get("lang") or ""
+    # Never the bare lang= key: partners echo the request's lang= on every offer line
+    # (journeys ...142/...151: an English speaker got a Georgian-only h3 slot).
+    raw = offer.get("doctor_lang") or offer.get("languages") or ""
     langs = {part.strip().lower() for part in re.split(r"[/,;]", raw) if part.strip()}
     return langs or None
 
@@ -2816,11 +2818,21 @@ def _fits_partner(
     doctor = offer.get("doctor_id", "")
     lang = _lang(chat)
     langs = _partner_langs(offer)
-    if langs is not None:
-        # The partner told us who speaks what: trust it over our own doctor table.
-        if lang not in langs:
-            return False
-    elif doctor and doctor.rsplit("-", 1)[-1] in _DOCTORS and not _speaks(doctor, lang):
+    key = doctor.rsplit("-", 1)[-1] if doctor else ""
+    if key in _DOCTORS:
+        # Every ASST has the same doctors (h1 it/en, h2 it, h3 it + its rare language): our
+        # table is the truth for it/en. A partner's doctor_lang only settles the rare one.
+        if not _speaks(doctor, lang):
+            rare_ok = (
+                "*" in _DOCTORS[key][0]
+                and lang not in {"it", "en"}
+                and langs is not None
+                and lang in langs
+                and _RARE_BY_ASST.get(_asst_of(doctor)) in (None, lang)
+            )
+            if not rare_ok:
+                return False
+    elif langs is not None and lang not in langs:
         return False
     gender = _gender(chat)
     said_gender = (offer.get("doctor_gender") or "").lower()
@@ -2899,6 +2911,8 @@ async def _go_partner(
             unique.append(agent_id)
     text = (
         f"need.request service_type={service} procedure={procedure} priority={priority or 'D'} "
+        + (f"lang={_lang(chat)} " if _lang(chat) not in {"", "it"} else "")
+        + ""
         f"request_id={need_id or 'case'} Richiesta di disponibilità da un'ASST partner."
     )
     results = await asyncio.gather(
