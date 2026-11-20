@@ -23,7 +23,7 @@ from pathlib import Path
 from city_sdk.city import LEDGER, CapError, City, Message, Need, OutOfScope, clinical, understood
 
 ROLES = ("booking_centre", "gp", "hospital", "specialist_care", "family_counseling")
-_MAX_PAGE = 8
+_MAX_PAGE = 20  # pages start at the world's first week: the current week can be far in
 # Four agenda hours is about half a minute of real time at 480x, so a slot is still
 # ahead when the citizen decides. One hour was already past by then.
 _LEAD = timedelta(hours=4)
@@ -1543,6 +1543,55 @@ def _page(text: str) -> tuple[int, int]:
     return 1, 1
 
 
+def _pages_seen(chat: list[Message], procedure: str) -> set[int]:
+    seen: set[int] = set()
+    for row in chat:
+        if not _is_world_reply(row):
+            continue
+        text = _normalize_world(row.text)
+        lines = text.splitlines()
+        named = {fields_of(line).get("procedure") for line in lines if "slot_id=" in line}
+        head = fields_of(lines[0] if lines else "").get("procedure")
+        if procedure in named or head == procedure:
+            seen.add(_page(text)[0])
+    return seen
+
+
+async def _fetch_pages(
+    city: City, need_id: str | None, chat: list[Message], agent: str, procedure: str, world: str
+) -> list[Message]:
+    pages = min(_page(world)[1], _MAX_PAGE)
+    wanted = set(range(1, pages + 1))
+    if wanted <= _pages_seen(chat, procedure):
+        return chat
+    for page in range(2, pages + 1):
+        if not _asked(chat, agent, procedure, page):
+            await _say(city, LEDGER, f"world procedure={procedure} page={page}")
+    return await _until(city, need_id, chat, lambda rows: wanted <= _pages_seen(rows, procedure))
+
+
+def _merged_slots(chat: list[Message], procedure: str) -> str | None:
+    """Every page of the slot list for this procedure, as one list (page 1's head line)."""
+
+    head = ""
+    lines: dict[str, str] = {}
+    for row in chat:
+        if not _is_world_reply(row):
+            continue
+        text = _normalize_world(row.text)
+        rows = text.splitlines()
+        slots = [line for line in rows if "slot_id=" in line and fields_of(line).get("procedure") == procedure]
+        if not slots:
+            continue
+        if not head or _page(text)[0] == 1:
+            head = rows[0] if rows and "slot_id=" not in rows[0] else head
+        for line in slots:
+            lines.setdefault(fields_of(line).get("slot_id", ""), line)
+    if not lines:
+        return None
+    return "\n".join([head] + list(lines.values())) if head else "\n".join(lines.values())
+
+
 def _asked(chat: list[Message], agent: str, procedure: str, page: int) -> bool:
     token = f"page={page}"
     proc = f"procedure={procedure}"
@@ -2236,6 +2285,12 @@ async def _advance_alone(
         return
     if now is None or world is None:
         return
+    # The Ledger pages its slot list from the first week of the world, so this week's slots
+    # sit on later pages: an English citizen on 16 Nov was told "no slot in our ASST" with
+    # h1 free on Monday and Tuesday. Ask every page at once, wait once, choose from all.
+    if _page(world)[1] > 1:
+        chat = await _fetch_pages(city, message.need_id, chat, agent, procedure, world)
+        world = _merged_slots(chat, procedure) or world
     # A cancel drops every offer the citizen was holding, so the ones still free are sent again,
     # once per cancel: a second turn for the same cancel or refusal does not repeat them.
     sent = _sent(key)

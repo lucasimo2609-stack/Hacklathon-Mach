@@ -1,7 +1,7 @@
 agent_id: agent:h6r1v45esk77
 team: team:red-agent
 name: hospital
-version: 1.0.4
+version: 1.0.5
 cap_versions:
   - "1.0"
 profiles:
