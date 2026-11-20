@@ -2789,16 +2789,35 @@ def _since_cross(chat: list[Message], agent: str, citizen: str) -> list[Message]
     return after
 
 
+_DOCTOR_ID = re.compile(r"^asst-[a-z0-9]+(?:-[a-z0-9]+)*-[hsc]\d$")
+
+
 def _partner_offers(chat: list[Message], agent: str) -> list[tuple[str, dict[str, str]]]:
+    """Offers from partner facilities. Security (impostor agents from 21 Nov): only from an
+    agent we asked in this case, with a real doctor id, and naming no other facility."""
+
+    asked = {
+        row.recipient for row in chat
+        if row.sender == agent and row.recipient.startswith("agent:") and "need.request" in words(row.text)
+    }
     found: list[tuple[str, dict[str, str]]] = []
     for row in chat:
         if row.sender == agent or not row.sender.startswith("agent:"):
             continue
         if "offer" not in words(row.text):
             continue
+        if asked and row.sender not in asked:
+            continue  # unsolicited offer: not from a partner we asked
         for offer in _offers_in(row.text):
-            if offer.get("slot_id"):
-                found.append((row.sender, offer))
+            if not offer.get("slot_id"):
+                continue
+            doctor = offer.get("doctor_id", "")
+            if doctor and not _DOCTOR_ID.match(doctor):
+                continue  # not a registry doctor id
+            facility = offer.get("facility", "")
+            if facility.startswith("agent:") and facility != row.sender:
+                continue  # an agent offering another agent's slots
+            found.append((row.sender, offer))
     return found
 
 
@@ -3262,6 +3281,15 @@ async def _forward_receipt(city: City, message: Message, chat: list[Message]) ->
     ledger_ref = fields.get("ledger_ref", "")
     citizen = _citizen(chat)
     if not booking_id or not ledger_ref or not citizen:
+        return
+    # Security: a receipt counts only from a facility we sent a confirm to in this case.
+    # A forged receipt passed on to the citizen would be a phantom booking (-2).
+    confirmed = any(
+        row.sender == city.agent_id and row.recipient == message.sender and "confirm" in words(row.text)
+        for row in chat
+    )
+    if message.sender.startswith("agent:") and not confirmed:
+        _LOG.warning("care.receipt.unsolicited", extra={"sender": message.sender[:60]})
         return
     token = f"booking_id={booking_id}"
     if _we(chat, city.agent_id, token, to=citizen, word="booking.receipt"):
