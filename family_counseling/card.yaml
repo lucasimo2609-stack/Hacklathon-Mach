@@ -1,0 +1,15 @@
+agent_id: agent:bzs050xacs1m
+﻿agent_id: agent:fkeq1e0bb2be
+team: team:red-agent
+name: family_counseling
+version: 1.0.1
+cap_versions:
+  - "1.0"
+profiles:
+  - mhm/1.0
+role: facility
+capabilities:
+  - family_counseling.gynecology
+no_clinical_advice: true
+endpoints:
+  mailbox: agent:bzs050xacs1m
