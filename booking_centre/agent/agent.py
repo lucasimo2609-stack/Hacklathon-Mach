@@ -1852,6 +1852,18 @@ async def _advance_alone(
     preferred = [s for s in best if not days or s.get("day", "") in days]
     relaxed = [s for s in fitting(lines, gender=None, **common) if usable(s)]
     chosen = _diverse((preferred, best, relaxed), 3)
+    if chosen and not replacing:
+        # Several turns of one case (a Ledger answer, a second replica) can reach this point
+        # together: read the case again and send nothing if another turn already offered.
+        try:
+            latest = await city.history(need_id=message.need_id)
+        except CapError:
+            latest = chat
+        if _offered(latest, agent) or any(
+            row.sender == agent and row.recipient == citizen and "waiting_list=true" in row.text
+            for row in latest
+        ):
+            return
     if chosen:
         text = "\n".join(_offer_line(slot, number, priority) for slot in chosen)
         if await _say(city, citizen, f"{text}\n{_desk_line('offers', chat)}"):
@@ -2345,6 +2357,7 @@ async def _on_confirm(
             parts.append(f"consent_ref={consent}")
             if not await _say(city, LEDGER, " ".join(parts)):
                 return
+            _HELD[slot] = time.monotonic()
         await _finish_booking(city, message, chat, slot, hold_self=hold_self)
         return
     if not facility or not citizen:
@@ -2509,13 +2522,22 @@ async def _ack(city: City, to: str, text: str) -> None:
     await _say(city, to, text)
 
 
-async def _partner_request(city: City, message: Message, chat: list[Message]) -> None:
+async def _partner_request(
+    city: City,
+    message: Message,
+    chat: list[Message],
+    *,
+    partner: str = "",
+    request: str = "",
+    exclude: frozenset[str] = frozenset(),
+) -> None:
     """Another ASST's booking centre asks for our slots (search criteria only). Answer fast
-    with real, free slots of THIS facility from our Ledger, all in one message."""
+    with real, free slots of THIS facility from our Ledger, all in one message.
+    With ``request``/``exclude`` it re-offers after a refused hold (alternatives)."""
 
     agent = city.agent_id
-    partner = message.sender
-    fields = fields_of(message.text)
+    partner = partner or message.sender
+    fields = fields_of(request or message.text)
     procedure = fields.get("procedure", "")
     if not procedure:
         # Some partners send only service_type=hospital.physiatry and no procedure.
@@ -2530,7 +2552,7 @@ async def _partner_request(city: City, message: Message, chat: list[Message]) ->
     want_lang = (fields.get("lang") or fields.get("language") or "").lower()
     if not procedure:
         return
-    if any(row.sender == agent and row.recipient == partner for row in chat):
+    if not request and any(row.sender == agent and row.recipient == partner for row in chat):
         return  # already answered this request
     _remember(chat)
     now = _agenda_now()
@@ -2578,7 +2600,7 @@ async def _partner_request(city: City, message: Message, chat: list[Message]) ->
                 break
             if slot not in slots:
                 slots.append(slot)
-        slots = slots[:6]
+        slots = [s for s in slots if s.get("slot_id") not in exclude and not _recently_held(s.get("slot_id", ""))][:6]
     if not slots:
         tail = f" request_id={request_id}" if request_id else ""
         await _say(city, partner, f"cancel reason=no_availability procedure={procedure}{tail}")
@@ -2821,8 +2843,47 @@ async def _on_refused(
         code = re.search(r"\b[A-Z][A-Z_]{3,}\b", message.text)
         extra = f" code={code.group(0)}" if code else ""
         await _say(city, target, f"cancel offer_id={offer_id} reason=facility_cancelled{extra}")
+        # A partner ASST's booking centre loses its citizen if it has to start over: offer the
+        # next free slots of ours at once (not for a refusal another slot cannot fix).
+        unfixable = {"PRESCRIPTION_EXPIRED", "CONSENT_MISSING", "DUPLICATE"}
+        if (
+            target.startswith("agent:")
+            and target != _OWN_BOOKING
+            and not (code and code.group(0) in unfixable)
+        ):
+            offered = _offer_to(chat, agent, target, slot)
+            procedure = offered.get("procedure") or _visit_procedure(chat)
+            if procedure:
+                request = f"need.request procedure={procedure}"
+                if offered.get("priority"):
+                    request += f" priority={offered['priority']}"
+                if offered.get("request_id"):
+                    request += f" request_id={offered['request_id']}"
+                await _partner_request(
+                    city, message, chat, partner=target, request=request, exclude=frozenset({slot})
+                )
     if hold_self:
         await _advance(city, message, chat, fixed="CONS-GIN", replacing=True)
+
+
+_OWN_BOOKING = "agent:cdc7x6m21nj6"
+_HELD: dict[str, float] = {}
+
+
+def _recently_held(slot_id: str) -> bool:
+    """A slot this process held in the last 10 real minutes: do not offer it to anyone else."""
+
+    since = _HELD.get(slot_id)
+    return since is not None and time.monotonic() - since < 600
+
+
+def _offer_to(chat: list[Message], agent: str, target: str, slot: str) -> dict[str, str]:
+    for row in chat:
+        if row.sender == agent and row.recipient == target:
+            for offer in _offers_in(row.text):
+                if offer.get("slot_id") == slot:
+                    return offer
+    return {}
 
 
 async def _on_checkin(city: City, message: Message, chat: list[Message], *, reports: bool) -> None:
