@@ -1155,6 +1155,30 @@ _DESK_SAY: dict[str, dict[str, str]] = {
         "it": "Per prenotare mi serve il numero della ricetta del medico di base.",
         "en": "To book, I need the number your GP gave you.",
     },
+    "arrived": {
+        "it": "Benvenuto, il suo arrivo è registrato: il medico la riceverà a breve.",
+        "en": "Welcome, your arrival is recorded: the doctor will see you shortly.",
+    },
+    "share": {
+        "it": "Posso condividere con lei il referto della visita in formato digitale? Così non "
+        "dovrà tornare a ritirarlo.",
+        "en": "May I share the visit summary with you digitally? That way you will not need to "
+        "come back to collect it.",
+    },
+    "reported": {
+        "it": "Il referto è archiviato e condiviso con lei in digitale: nessun viaggio in più.",
+        "en": "Your visit summary is filed and shared with you digitally: no extra trip.",
+    },
+    "kept": {
+        "it": "Come richiesto, il referto è archiviato ma non condiviso.",
+        "en": "As you asked, the visit summary is filed but not shared.",
+    },
+    "follow": {
+        "it": "Per il controllo cardiologico successivo ecco la nuova ricetta: può prenotarla "
+        "dal centro prenotazioni quando vuole.",
+        "en": "For your follow-up heart check, here is the new prescription number: you can "
+        "book it at the booking centre whenever you like.",
+    },
     "receipt": {
         "it": "Prenotazione confermata. Porti con sé la tessera sanitaria e arrivi qualche "
         "minuto prima. Se può, usi i mezzi pubblici: si evita il traffico e si inquina meno.",
@@ -1793,6 +1817,12 @@ async def _facility(
         await _on_reported(city, message, chat)
     elif "checkin" in kind and message.sender.startswith("citizen:"):
         await _on_checkin(city, message, chat, reports=reports)
+    elif (
+        reports
+        and message.sender.startswith("citizen:")
+        and _report_asked(chat, city.agent_id, message.sender)
+    ):
+        await _on_report_consent(city, message, chat)
     elif "confirm" in kind:
         await _on_confirm(city, message, chat, hold_self=hold_self)
 
@@ -1988,19 +2018,90 @@ async def _on_checked_in(
     if not booking_id:
         return
     token = f"booking_id={booking_id}"
-    if reports and not _we(chat, city.agent_id, token, to=LEDGER, word="report"):
-        await _say(city, LEDGER, f"report booking_id={booking_id} outcome_code=VISIT")
     if citizen and not _we(chat, city.agent_id, token, to=citizen, word="checkin"):
-        await _say(city, citizen, f"checkin booking_id={booking_id}")
-    if not reports:
+        await _say(city, citizen, f"checkin booking_id={booking_id} " + _desk_line("arrived", chat))
+    if not reports or not citizen:
+        return
+    # Specialist: ask, with its purpose, before the report is shared (report_sharing).
+    if not _we(chat, city.agent_id, "purpose=report_sharing", to=citizen, word="consent"):
+        await _say(
+            city,
+            citizen,
+            f"consent purpose=report_sharing {token} " + _desk_line("share", chat),
+        )
+
+
+def _report_asked(chat: list[Message], agent: str, citizen: str) -> str:
+    """The booking whose report we asked consent for, if any."""
+
+    for row in chat:
+        if row.sender == agent and row.recipient == citizen and "purpose=report_sharing" in row.text.split():
+            return fields_of(row.text).get("booking_id", "")
+    return ""
+
+
+def _visit_procedure(chat: list[Message]) -> str:
+    for row in reversed(chat):
+        procedure = fields_of(row.text).get("procedure", "")
+        if procedure in _SERVICE:
+            return procedure
+    return ""
+
+
+async def _on_report_consent(city: City, message: Message, chat: list[Message]) -> None:
+    """The citizen answered our report_sharing question. File the report on the Ledger (shared
+    only with consent), with the follow-up prescription the cardiology journey needs."""
+
+    agent = city.agent_id
+    citizen = message.sender
+    booking_id = _report_asked(chat, agent, citizen)
+    if not booking_id:
+        return
+    token = f"booking_id={booking_id}"
+    if _we(chat, agent, token, to=LEDGER, word="report"):
+        return
+    consent = fields_of(message.text).get("consent_ref", "")
+    # A first cardiology visit (VIS-CARD) gets its control visit (CTRL-CARD); a control does not.
+    follow = ""
+    if _visit_procedure(chat) != "CTRL-CARD":
+        follow = _fresh_rx(message.need_id, booking_id, "F")
+        if not await _say(
+            city,
+            LEDGER,
+            f"prescribe patient={citizen} procedure=CTRL-CARD priority=D "
+            f"prescription_number={follow} follow_up_of={booking_id}",
+        ):
+            follow = ""
+    parts = [f"report {token} outcome_code=VISIT"]
+    if consent:
+        parts.append(f"consent_ref={consent}")
+    else:
+        parts.append("shared=false")
+    if follow:
+        parts.append(f"follow_up_prescription_number={follow}")
+    if not await _say(city, LEDGER, " ".join(parts)):
         return
     found = await _await_line(city, message.need_id, chat, "reported", token, op="report")
-    if found is None:
-        _LOG.info("care.report.missing", extra={"need_id": (message.need_id or "")[:48]})
+    fresh = found[1] if found else chat
+    await _tell_report(city, fresh, citizen, booking_id, bool(consent), follow)
+
+
+async def _tell_report(
+    city: City, chat: list[Message], citizen: str, booking_id: str, shared: bool, follow: str
+) -> None:
+    token = f"booking_id={booking_id}"
+    if _we(chat, city.agent_id, token, to=citizen, word="report"):
         return
-    reply, fresh = found
-    if first_word(reply.text) == "reported":
-        await _on_reported(city, reply, fresh)
+    head = f"report {token} outcome_code=VISIT" + ("" if shared else " shared=false")
+    line = _desk_line("reported" if shared else "kept", chat)
+    await _say(city, citizen, f"{head} {line}")
+    if follow:
+        await _say(
+            city,
+            citizen,
+            f"prescription prescription_number={follow} procedure=CTRL-CARD priority=D "
+            f"follow_up_of={booking_id} " + _desk_line("follow", chat),
+        )
 
 
 async def _on_reported(city: City, message: Message, chat: list[Message]) -> None:
@@ -2008,7 +2109,12 @@ async def _on_reported(city: City, message: Message, chat: list[Message]) -> Non
     citizen = _citizen(chat)
     if not booking_id or not citizen:
         return
-    token = f"booking_id={booking_id}"
-    if _we(chat, city.agent_id, token, to=citizen, word="report"):
+    sent = [row for row in chat if row.sender == city.agent_id and row.recipient == LEDGER
+            and row.text.startswith("report ") and f"booking_id={booking_id}" in row.text.split()]
+    if not sent:
         return
-    await _say(city, citizen, f"report booking_id={booking_id} outcome_code=VISIT")
+    fields = fields_of(sent[-1].text)
+    await _tell_report(
+        city, chat, citizen, booking_id, bool(fields.get("consent_ref")),
+        fields.get("follow_up_prescription_number", ""),
+    )
