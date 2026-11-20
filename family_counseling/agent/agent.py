@@ -1783,9 +1783,59 @@ def _facility_turn(message: Message) -> bool:
         return True
     if "checkin" in kind and message.sender.startswith("citizen:"):
         return True
+    if "need.request" in kind and message.sender.startswith("agent:"):
+        return True
     return "confirm" in kind and (
         message.sender.startswith("agent:") or message.sender.startswith("citizen:")
     )
+
+
+_ROLE_NAMES = {"hospital": "hospital", "specialist_care": "specialist", "family_counseling": "family_counseling"}
+
+
+async def _partner_request(city: City, message: Message, chat: list[Message]) -> None:
+    """Another ASST's booking centre asks for our slots (search criteria only). Answer fast
+    with real, free slots of THIS facility from our Ledger, all in one message."""
+
+    agent = city.agent_id
+    partner = message.sender
+    fields = fields_of(message.text)
+    procedure = fields.get("procedure", "")
+    priority = fields.get("priority") or None
+    request_id = fields.get("request_id", "")
+    if not procedure:
+        return
+    if any(row.sender == agent and row.recipient == partner for row in chat):
+        return  # already answered this request
+    if not _exact(chat, agent, "agenda"):
+        await _say(city, LEDGER, "agenda")
+    if not _asked(chat, agent, procedure, 1):
+        await _say(city, LEDGER, f"world procedure={procedure} page=1")
+    chat = await _until(
+        city, message.need_id, chat,
+        lambda rows: _has_agenda(rows) and _latest_slots(rows) is not None,
+    )
+    agenda = _ledger(chat, "agenda")
+    now = _when("" if agenda is None else agenda.get("agenda_now", ""))
+    world = _latest_slots(chat)
+    mine = {agent, _ROLE_NAMES.get(role_of(), "")} - {""}
+    slots: list[dict[str, str]] = []
+    if now is not None and world is not None:
+        lines = [line for line in world.splitlines() if "slot_id=" in line]
+        slots = [
+            slot
+            for slot in fitting(lines, now=now, priority=priority, lang="it", procedure=procedure)
+            if slot.get("facility", "") in mine
+        ][:3]
+    if not slots:
+        tail = f" request_id={request_id}" if request_id else ""
+        await _say(city, partner, f"cancel reason=no_availability procedure={procedure}{tail}")
+        return
+    offers = []
+    for slot in slots:
+        line = _offer_line({**slot, "facility": agent}, None, priority)
+        offers.append(f"{line} request_id={request_id}" if request_id else line)
+    await _say(city, partner, "\n".join(offers))
 
 
 async def _family(city: City, message: Message, chat: list[Message]) -> None:
@@ -1823,6 +1873,8 @@ async def _facility(
         and _report_asked(chat, city.agent_id, message.sender)
     ):
         await _on_report_consent(city, message, chat)
+    elif "need.request" in kind and message.sender.startswith("agent:") and "confirm" not in kind:
+        await _partner_request(city, message, chat)
     elif "confirm" in kind:
         await _on_confirm(city, message, chat, hold_self=hold_self)
 
