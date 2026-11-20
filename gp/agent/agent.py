@@ -437,10 +437,27 @@ async def _say(city: City, to: str, text: str) -> bool:
     return True
 
 
+# The Ledger's answer words, as the kit shows them and the other spellings a reply may use.
+_HEAD_ALIASES = {
+    "checked_in": {"checked_in", "checkedin", "checked-in", "checked", "checkin_ok", "arrived"},
+    "reported": {"reported", "report_filed", "filed"},
+    "held": {"held", "hold_ok"},
+    "committed": {"committed", "confirmed", "booked"},
+}
+
+
+def _canon(text: str) -> str:
+    head = first_word(text)
+    for canon, names in _HEAD_ALIASES.items():
+        if head in names:
+            return canon
+    return head
+
+
 def _latest(chat: list[Message], head: str, token: str) -> Message | None:
     found: Message | None = None
     for row in chat:
-        if row.sender == LEDGER and first_word(row.text) == head and token in row.text.split():
+        if row.sender == LEDGER and _canon(row.text) == head and token in row.text.split():
             found = row
     return found
 
@@ -490,7 +507,9 @@ async def _await_line(
         for row in fresh:
             if row.msg_id in known or row.sender != LEDGER:
                 continue
-            if first_word(row.text) == "refused" and op in words(row.text):
+            if first_word(row.text) == "refused" and (
+                op in words(row.text) or f"op={op}" in row.text or f"operation={op}" in row.text
+            ):
                 return row, fresh
         if attempt + 1 < _PULL_TRIES:
             await asyncio.sleep(_PULL_PAUSE)
@@ -1360,6 +1379,24 @@ _DESK_SAY: dict[str, dict[str, str]] = {
     "number": {
         "it": "Per prenotare mi serve il numero della ricetta del medico di base.",
         "en": "To book, I need the number your GP gave you.",
+    },
+    "desk": {
+        "it": "Buongiorno, sono lo sportello della struttura. Quando arriva per la visita mi "
+        "scriva il codice della prenotazione (booking_id) e la registro subito.",
+        "en": "Hello, this is the facility desk. When you arrive for your visit, send me your "
+        "booking code (booking_id) and I will register you straight away.",
+    },
+    "need_booking": {
+        "it": "Benvenuto! Per registrare il suo arrivo mi serve il codice della prenotazione "
+        "(booking_id) che trova sulla ricevuta.",
+        "en": "Welcome! To register your arrival I need the booking code (booking_id) shown on "
+        "your receipt.",
+    },
+    "checkin_refused": {
+        "it": "Mi dispiace, il registro non accetta questo arrivo per questa prenotazione. "
+        "Verifichi il codice o contatti il centro prenotazioni: la aiuteranno subito.",
+        "en": "Sorry, the register does not accept this arrival for this booking. Please check "
+        "the code or contact the booking centre: they will help you right away.",
     },
     "arrived": {
         "it": "Benvenuto, il suo arrivo è registrato: il medico la riceverà a breve.",
@@ -2245,13 +2282,13 @@ async def _partner_cancel(
 
 
 def _facility_turn(message: Message) -> bool:
-    head = first_word(message.text)
+    head = _canon(message.text) if message.sender == LEDGER else first_word(message.text)
     kind = words(message.text)
     if message.sender == LEDGER and head in {"held", "committed", "checked_in", "reported"}:
         return True
-    if message.sender == LEDGER and head == "refused" and "hold" in kind:
+    if message.sender == LEDGER and head == "refused" and ("hold" in kind or "checkin" in kind):
         return True
-    if "checkin" in kind and message.sender.startswith("citizen:"):
+    if message.sender.startswith("citizen:") and ("checkin" in kind or _arrival(message.text)):
         return True
     if _is_partner_request(message):
         return True
@@ -2427,7 +2464,7 @@ async def _facility(
     reports: bool,
     hold_self: bool,
 ) -> None:
-    head = first_word(message.text)
+    head = _canon(message.text) if message.sender == LEDGER else first_word(message.text)
     kind = words(message.text)
     if message.sender == LEDGER and head == "held":
         await _on_held(city, message, chat)
@@ -2451,6 +2488,33 @@ async def _facility(
         await _partner_request(city, message, chat)
     elif "confirm" in kind:
         await _on_confirm(city, message, chat, hold_self=hold_self)
+    elif message.sender.startswith("citizen:") and _arrival(message.text):
+        # "Sono arrivato" in plain words: a check-in, even without the act word.
+        await _on_checkin(city, message, chat, reports=reports)
+    elif message.sender.startswith("citizen:") and not _answered(chat, city.agent_id, message):
+        # Never silent at the desk: a question we have no branch for still gets an answer.
+        await _say(city, message.sender, _desk_line("desk", chat))
+
+
+_ARRIVAL = re.compile(
+    r"\b(sono (arrivat\w|qui|allo sportello|in sala)|arrivat\w|eccomi|i.?m here|i have arrived|arrived|check.?in)\b"
+)
+
+
+def _arrival(text: str) -> bool:
+    return bool(_ARRIVAL.search(_fold(text)))
+
+
+def _booking_in_case(chat: list[Message]) -> str:
+    """The booking of this case, from the Ledger's commit or the receipt we sent."""
+
+    found = ""
+    for row in chat:
+        if row.sender == LEDGER and _canon(row.text) == "committed":
+            found = fields_of(row.text).get("booking_id", found)
+        elif "booking.receipt" in words(row.text):
+            found = fields_of(row.text).get("booking_id", found)
+    return found
 
 
 def _booking_of(chat: list[Message], agent: str, slot_id: str) -> tuple[str, str, str | None]:
@@ -2619,9 +2683,14 @@ async def _on_refused(
 
 
 async def _on_checkin(city: City, message: Message, chat: list[Message], *, reports: bool) -> None:
-    booking_id = fields_of(message.text).get("booking_id", "")
+    booking_id = fields_of(message.text).get("booking_id", "") or _booking_in_case(chat)
     citizen = message.sender if message.sender.startswith("citizen:") else _citizen(chat)
-    if not booking_id or not citizen:
+    if not citizen:
+        return
+    if not booking_id:
+        # We cannot check in without the booking: ask for it, once per message.
+        if not _answered(chat, city.agent_id, message):
+            await _say(city, citizen, "data.request purpose=checkin fields=booking_id " + _desk_line("need_booking", chat))
         return
     token = f"booking_id={booking_id}"
     if not _we(chat, city.agent_id, token, to=LEDGER, word="checkin"):
@@ -2629,11 +2698,36 @@ async def _on_checkin(city: City, message: Message, chat: list[Message], *, repo
             return
     found = await _await_line(city, message.need_id, chat, "checked_in", token, op="checkin")
     if found is None:
-        _LOG.info("care.checkin.missing", extra={"need_id": (message.need_id or "")[:48]})
+        # The Ledger's answer opens its own turn (or uses a wording we do not know): the
+        # check-in is written; welcome the citizen now instead of leaving them waiting.
+        _LOG.warning("care.checkin.no_answer booking_id=%s", booking_id)
+        fresh = chat
+        try:
+            fresh = await city.history(need_id=message.need_id)
+        except CapError:
+            pass
+        await _on_checked_in(city, _note(message, f"checked_in {token}"), fresh, reports=reports)
         return
     reply, fresh = found
-    if first_word(reply.text) == "checked_in":
+    if _canon(reply.text) == "checked_in":
         await _on_checked_in(city, reply, fresh, reports=reports)
+    elif first_word(reply.text) == "refused":
+        # A refused check-in is never retried (4xx): tell the citizen plainly why.
+        code = re.search(r"\b[A-Z][A-Z_]{3,}\b", reply.text)
+        await _say(
+            city, citizen,
+            f"{token} reason={(code.group(0) if code else 'checkin_refused').lower()} "
+            + _desk_line("checkin_refused", chat),
+        )
+
+
+def _note(message: Message, text: str) -> Message:
+    """A stand-in message carrying ``text``, for code that reads the Ledger's answer."""
+
+    return Message(
+        type="chat", sender=LEDGER, msg_id=message.msg_id, need_id=message.need_id,
+        conversation_id=message.conversation_id, body={"text": text}, recipient=message.recipient,
+    )
 
 
 async def _on_checked_in(
