@@ -562,9 +562,9 @@ def _speaks(doctor_id: str, lang: str) -> bool:
 # like asst-toros-h3) -> language of its "*" doctor, and the district its agents sit in.
 _RARE_BY_ASST: dict[str, str] = {
     "giambellino": "ka", "toros": "ro", "precotto": "ro", "nord": "ur", "corvetto": "fr",
-    "brera": "fa", "isola": "tl",
+    "brera": "fa", "isola": "tl", "ortica": "wo",
 }
-_DISTRICT_BY_LANG: dict[str, int] = {"ro": 9, "ur": 2, "fr": 3, "fa": 7, "tl": 8}
+_DISTRICT_BY_LANG: dict[str, int] = {"ro": 9, "ur": 2, "fr": 3, "fa": 7, "tl": 8, "wo": 6}
 # Agents of other teams listed on Discord (team -> ids). Add every list that is posted.
 _TRUSTED_AGENTS: set[str] = {
     # asst-nord, team agentic-paguri
@@ -2699,6 +2699,9 @@ async def _partner_request(
         priority = None
     request_id = fields.get("request_id", "")
     want_lang = (fields.get("lang") or fields.get("language") or "").lower()
+    # Ortica and others send gender_preference= when the citizen asked for it.
+    want_gender = (fields.get("gender_preference") or fields.get("gender") or "").lower()
+    want_gender = want_gender if want_gender in {"m", "f"} else None
     if not procedure:
         return
     if not request and any(row.sender == agent and row.recipient == partner for row in chat):
@@ -2728,7 +2731,8 @@ async def _partner_request(
         lines = [line for line in world.splitlines() if "slot_id=" in line]
         ours = [
             slot
-            for slot in fitting(lines, now=now, priority=priority, lang=want_lang or "it", procedure=procedure)
+            for slot in fitting(lines, now=now, priority=priority, lang=want_lang or "it",
+                                gender=want_gender, procedure=procedure)
             if slot.get("facility", "") in mine
         ]
         if not ours and want_lang:
