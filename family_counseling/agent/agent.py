@@ -560,8 +560,17 @@ def _speaks(doctor_id: str, lang: str) -> bool:
 
 # Rare languages of partner ASSTs, as the teams told us on Discord. ASST name (from doctor ids
 # like asst-toros-h3) -> language of its "*" doctor, and the district its agents sit in.
-_RARE_BY_ASST: dict[str, str] = {"giambellino": "ka", "toros": "ro"}
-_DISTRICT_BY_LANG: dict[str, int] = {"ro": 9}
+_RARE_BY_ASST: dict[str, str] = {"giambellino": "ka", "toros": "ro", "nord": "ur"}
+_DISTRICT_BY_LANG: dict[str, int] = {"ro": 9, "ur": 2}
+# Partner facilities the teams gave us on Discord (service -> agent id), by rare language.
+# They are asked first for that language, and always asked, even if the Index misses them.
+_PARTNER_AGENTS: dict[str, dict[str, str]] = {
+    "ur": {  # asst-nord, Municipio 2, team agentic-paguri
+        "hospital.physiatry": "agent:gpr1zqe343gb",
+        "specialist_care.cardiology": "agent:zand0f57ec1j",
+        "family_counseling.gynecology": "agent:ccjzqm7yekwx",
+    },
+}
 
 
 def _asst_of(doctor_id: str) -> str:
@@ -2159,16 +2168,22 @@ async def _go_partner(
     # in seconds. The offers are filtered on our side (_fits_partner, doctor_lang=).
     seen_ids: set[str] = set()
     unique = []
-    for peer in partners:
-        if peer.agent_id not in seen_ids:
-            seen_ids.add(peer.agent_id)
-            unique.append(peer)
+    lang = _lang(chat)
+    known_first = [
+        by_service[service]
+        for code, by_service in sorted(_PARTNER_AGENTS.items(), key=lambda item: item[0] != lang)
+        if service in by_service and by_service[service] not in own
+    ]
+    for agent_id in known_first + [peer.agent_id for peer in partners]:
+        if agent_id not in seen_ids:
+            seen_ids.add(agent_id)
+            unique.append(agent_id)
     text = (
         f"need.request service_type={service} procedure={procedure} priority={priority or 'D'} "
         f"request_id={need_id or 'case'} Richiesta di disponibilità da un'ASST partner."
     )
     results = await asyncio.gather(
-        *(_say(city, peer.agent_id, text) for peer in unique[:_MAX_PARTNERS]),
+        *(_say(city, agent_id, text) for agent_id in unique[:_MAX_PARTNERS]),
         return_exceptions=True,
     )
     asked = sum(1 for ok in results if ok is True)
@@ -2842,7 +2857,9 @@ async def _on_refused(
         # P3 reserve, consent) instead of guessing.
         code = re.search(r"\b[A-Z][A-Z_]{3,}\b", message.text)
         extra = f" code={code.group(0)}" if code else ""
-        await _say(city, target, f"cancel offer_id={offer_id} reason=facility_cancelled{extra}")
+        # Reasons agreed on Discord: a P2 refusal is rule_p2_no_consent for every team.
+        reason = "rule_p2_no_consent" if code and code.group(0) == "CONSENT_MISSING" else "facility_cancelled"
+        await _say(city, target, f"cancel offer_id={offer_id} reason={reason}{extra}")
         # A partner ASST's booking centre loses its citizen if it has to start over: offer the
         # next free slots of ours at once (not for a refusal another slot cannot fix).
         unfixable = {"PRESCRIPTION_EXPIRED", "CONSENT_MISSING", "DUPLICATE"}
