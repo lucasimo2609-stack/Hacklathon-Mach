@@ -3,6 +3,9 @@ sys.path.insert(0, sys.argv[1]); sys.stdout.reconfigure(encoding="utf-8")
 import agent as A
 from city_sdk.city import Message, CapError, LEDGER
 A._PULL_PAUSE = 0.01
+# Sequential turns: the checkin turn waits for the answer; keep the wait short here (sp_flow.py
+# runs the real concurrent flow).
+A._REPORT_WAIT = 0.2; A._REPORT_POLL = 0.05
 ids = itertools.count(1); SP="agent:spec"; CIT="citizen:t/9"
 class C:
     def __init__(s): s.need=f"N-{next(ids)}"; s.rows=[]; s.out=[]; s.inbound=None
