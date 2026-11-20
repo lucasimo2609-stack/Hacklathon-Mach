@@ -26,7 +26,7 @@ ROLES = ("booking_centre", "gp", "hospital", "specialist_care", "family_counseli
 _MAX_PAGE = 20  # pages start at the world's first week: the current week can be far in
 # Four agenda hours is about half a minute of real time at 480x, so a slot is still
 # ahead when the citizen decides. One hour was already past by then.
-_LEAD = timedelta(hours=4)
+_LEAD = timedelta(hours=2)  # level 4 (scarcity): keep same-day slots; the chain takes seconds
 # Doctor key (the last segment of doctor_id) -> languages, gender, days. ``*`` is the ASST's
 # rare language. The Ledger's slot line names the doctor; it does not repeat this table.
 _DOCTORS: dict[str, tuple[frozenset[str], str, frozenset[str]]] = {
@@ -790,7 +790,7 @@ def _speaks(doctor_id: str, lang: str) -> bool:
 # like asst-toros-h3) -> language of its "*" doctor, and the district its agents sit in.
 _RARE_BY_ASST: dict[str, str] = {
     "giambellino": "ka", "toros": "ro", "precotto": "ro", "nord": "ur", "corvetto": "fr",
-    "brera": "fa", "isola": "tl", "ortica": "wo", "greco": "si", "bicocca": "ti",
+    "brera": "fa", "isola": "tl", "ortica": "wo", "greco": "si", "bicocca": "ti", "lambrate": "ja",
 }
 _DISTRICT_BY_LANG: dict[str, int] = {"ro": 9, "ur": 2, "fr": 3, "fa": 7, "tl": 8, "wo": 6}
 # Agents of other teams listed on Discord (team -> ids). Add every list that is posted.
@@ -803,6 +803,9 @@ _TRUSTED_AGENTS: set[str] = {
     # asst-bicocca, team p4radigm
     "agent:ez8cb7j167p2", "agent:rng5wcrzvhsj", "agent:bb01ggxymm05", "agent:sh35cbsy287d",
     "agent:nkh372rd16yq",
+    # asst-bovisa, team prompt-soccorso
+    "agent:vgtmj5nqfkxj", "agent:h82xpx3rkn9e", "agent:gxq3vzgt3h5t", "agent:tty8erdj6t41",
+    "agent:txar5994gbkj",
     # asst-lambrate, team LTF-JECATT
     "agent:gdrf9b9kxxss", "agent:c2ewegr2ea3v", "agent:nanpr5mgm2py", "agent:pky3vqyqbepa",
     "agent:atp772whjkgd",
@@ -812,12 +815,20 @@ _KNOWN_FACILITIES: dict[str, str] = {
     "agent:nanpr5mgm2py": "hospital.physiatry",          # Lambrate
     "agent:pky3vqyqbepa": "specialist_care.cardiology",  # Lambrate
     "agent:atp772whjkgd": "family_counseling.gynecology",  # Lambrate
+    "agent:gxq3vzgt3h5t": "hospital.physiatry",          # Bovisa
+    "agent:tty8erdj6t41": "specialist_care.cardiology",  # Bovisa
+    "agent:txar5994gbkj": "family_counseling.gynecology",  # Bovisa
 }
 _STRICT_PARTNERS = os.environ.get("CITY_STRICT_PARTNERS", "") == "1"
 
 # Partner facilities the teams gave us on Discord (service -> agent id), by rare language.
 # They are asked first for that language, and always asked, even if the Index misses them.
 _PARTNER_AGENTS: dict[str, dict[str, str]] = {
+    "ja": {  # asst-lambrate, team LTF-JECATT (Japanese)
+        "hospital.physiatry": "agent:nanpr5mgm2py",
+        "specialist_care.cardiology": "agent:pky3vqyqbepa",
+        "family_counseling.gynecology": "agent:atp772whjkgd",
+    },
     "si": {  # asst-greco, team tartufi-pazzi (Sinhala)
         "hospital.physiatry": "agent:xtj1dk9x3qej",
         "specialist_care.cardiology": "agent:q18es2d82f8r",
@@ -1715,7 +1726,7 @@ _LANG_NAMES = {
     "ukrainian": "uk", "ucraino": "uk", "albanian": "sq", "albanese": "sq", "portuguese": "pt",
     "portoghese": "pt", "german": "de", "tedesco": "de", "polish": "pl", "polacco": "pl",
     "tagalog": "tl", "filipino": "tl", "farsi": "fa", "persiano": "fa", "persian": "fa",
-    "singalese": "si", "sinhala": "si", "sinhalese": "si", "cingalese": "si", "tigrino": "ti",
+    "giapponese": "ja", "japanese": "ja", "singalese": "si", "sinhala": "si", "sinhalese": "si", "cingalese": "si", "tigrino": "ti",
     "wolof": "wo", "bengali": "bn", "urdu": "ur", "hindi": "hi",
     "turkish": "tr", "turco": "tr", "amharic": "am", "tigrinya": "ti", "wolof": "wo",
 }
@@ -1742,6 +1753,8 @@ def _script_lang(text: str) -> str:
         if re.search(r"[\u067e\u0686\u0698\u06af\u06a9\u06cc]", text):
             return "fa"
         return "ar"
+    if re.search(r"[\u3040-\u30ff]", text):
+        return "ja"  # hiragana / katakana (kanji alone would be Chinese)
     if re.search(r"[\u0d80-\u0dff]", text):
         return "si"  # Sinhala script
     if re.search(r"[\u1200-\u137f]", text):
@@ -2902,7 +2915,9 @@ async def _on_confirm(
     agent = city.agent_id
     fields = fields_of(message.text)
     offer_id = fields.get("offer_id", "")
-    consent = fields.get("consent_ref", "")
+    # MACH-1: a partner sends consent_ref (booking) and cross_asst_consent_ref (rule P2).
+    cross_ref = fields.get("cross_asst_consent_ref", "")
+    consent = fields.get("consent_ref", "") or cross_ref
     offer = _our_offer(chat, agent, offer_id) if offer_id else {}
     slot = fields.get("slot_id") or offer.get("slot_id", "")
     facility = fields.get("facility") or offer.get("facility", "")
@@ -2950,6 +2965,8 @@ async def _on_confirm(
             f"booking_consent_ref={consent}",
             f"facility={facility or via}",
         ]
+        if cross:
+            parts.append(f"cross_asst_consent_ref={cross}")  # MACH-1
         if number:
             parts.append(f"prescription_number={number}")
         if not await _say(city, via, " ".join(parts)):
@@ -2962,7 +2979,10 @@ async def _on_confirm(
                 parts.append(f"citizen={citizen}")
             if number:
                 parts.append(f"prescription_number={number}")
-            parts.append(f"consent_ref={consent}")
+            # A hold for another ASST's citizen carries the cross-ASST consent (rule P2).
+            parts.append(f"consent_ref={cross_ref or consent}")
+            if cross_ref:
+                parts.append(f"cross_asst_consent_ref={cross_ref}")
             if not await _say(city, LEDGER, " ".join(parts)):
                 return
             _HELD[slot] = time.monotonic()
@@ -3567,7 +3587,16 @@ async def _on_committed(city: City, message: Message, chat: list[Message]) -> No
     token = f"booking_id={booking_id}"
     if _we(chat, city.agent_id, token, to=target, word="booking.receipt"):
         return
-    await _say(city, target, f"booking.receipt booking_id={booking_id} ledger_ref={ledger_ref}")
+    extra = ""
+    if target.startswith("agent:") and slot:
+        # MACH-1: a partner's booking centre matches the receipt to its offer.
+        offer_id = ""
+        for row in chat:
+            for line in row.text.splitlines():
+                if f"slot_id={slot}" in line.split():
+                    offer_id = fields_of(line).get("offer_id", offer_id)
+        extra = f" slot_id={slot}" + (f" offer_id={offer_id}" if offer_id else "")
+    await _say(city, target, f"booking.receipt booking_id={booking_id} ledger_ref={ledger_ref}{extra}")
 
 
 async def _on_refused(
@@ -3595,7 +3624,7 @@ async def _on_refused(
         code = re.search(r"\b[A-Z][A-Z_]{3,}\b", message.text)
         extra = f" code={code.group(0)}" if code else ""
         # Reasons agreed on Discord: a P2 refusal is rule_p2_no_consent for every team.
-        reason = "rule_p2_no_consent" if code and code.group(0) == "CONSENT_MISSING" else "facility_cancelled"
+        reason = "rule_p2_no_consent" if code and code.group(0) == "CONSENT_MISSING" else "hold_refused"
         await _say(city, target, f"cancel offer_id={offer_id} reason={reason}{extra}")
         # A partner ASST's booking centre loses its citizen if it has to start over: offer the
         # next free slots of ours at once (not for a refusal another slot cannot fix).
