@@ -1245,18 +1245,96 @@ def _number(chat: list[Message]) -> str | None:
             if not number and isinstance(row.body, dict):
                 raw = row.body.get("prescription_number")
                 number = raw if isinstance(raw, str) else None
+            if not number:
+                number = _number_in_words(row.text)
             if number:
                 return number
     return None
 
 
+_RX_IN_TEXT = re.compile(r"prescription[_ ]number[-_ :=]+([A-Za-z0-9-]{4,60})", re.IGNORECASE)
+_NEED_IN_TEXT = re.compile(r"\b(N-\d{4}-\d{2}-\d{2}-\d{6,})\b", re.IGNORECASE)
+
+
+def _number_in_words(text: str) -> str | None:
+    """Level 3: the citizen writes the prescription number inside a sentence
+    ("la mia ricetta è prescription_number-N-2026-...", "ricetta N-2026-11-02-890917000068")."""
+
+    hit = _RX_IN_TEXT.search(text)
+    if hit:
+        value = hit.group(1).strip(".,;:!?)").upper()
+        return value if value.startswith("PRESCRIPTION") else f"prescription_number-{value}"
+    hit = _NEED_IN_TEXT.search(text)
+    if hit:
+        return f"prescription_number-{hit.group(1).upper()}"
+    return None
+
+
 def _lang(chat: list[Message]) -> str:
+    said = []
     for row in chat:
         if row.sender.startswith("citizen:"):
             lang = fields_of(row.text).get("lang", "")
+            if not lang and isinstance(row.body, dict) and isinstance(row.body.get("lang"), str):
+                lang = row.body["lang"]
             if lang:
-                return lang
+                return lang.lower()
+            said.append(row.text)
+    # Level 3: no lang= token. An explicit "parlo solo rumeno" wins, then the script and
+    # the words the citizen writes in.
+    for text in said:
+        asked = _lang_asked(text)
+        if asked:
+            return asked
+    for text in said:
+        guess = _script_lang(text) or _speaks_as(text)
+        if guess != "it":
+            return guess
     return "it"
+
+
+_LANG_NAMES = {
+    "georgian": "ka", "georgiano": "ka", "romanian": "ro", "rumeno": "ro", "romeno": "ro",
+    "romana": "ro", "arabic": "ar", "arabo": "ar", "english": "en", "inglese": "en",
+    "spanish": "es", "spagnolo": "es", "espanol": "es", "french": "fr", "francese": "fr",
+    "francais": "fr", "chinese": "zh", "cinese": "zh", "russian": "ru", "russo": "ru",
+    "ukrainian": "uk", "ucraino": "uk", "albanian": "sq", "albanese": "sq", "portuguese": "pt",
+    "portoghese": "pt", "german": "de", "tedesco": "de", "polish": "pl", "polacco": "pl",
+    "tagalog": "tl", "filipino": "tl", "bengali": "bn", "urdu": "ur", "hindi": "hi",
+    "turkish": "tr", "turco": "tr", "amharic": "am", "tigrinya": "ti", "wolof": "wo",
+}
+_LANG_ASK = re.compile(
+    r"(?:parl\w*|speak\w*|lingua|language|in)\s+(?:solo\s+|only\s+|soltanto\s+)?([a-z]+)"
+)
+
+
+def _lang_asked(text: str) -> str:
+    for word in _LANG_ASK.findall(_fold(text)):
+        code = _LANG_NAMES.get(word)
+        if code and code != "it":
+            return code
+    return ""
+
+
+def _script_lang(text: str) -> str:
+    if re.search(r"[\u10a0-\u10ff]", text):
+        return "ka"
+    if re.search(r"[\u0600-\u06ff]", text):
+        return "ar"
+    if re.search(r"[\u4e00-\u9fff]", text):
+        return "zh"
+    if re.search(r"[\u0400-\u04ff]", text):
+        return "ru"
+    folded = {_fold(word) for word in words(text.replace("'", " "))}
+    if len(folded & _RO_WORDS) >= 2:
+        return "ro"
+    return ""
+
+
+_RO_WORDS = frozenset(
+    {"buna", "ziua", "durere", "spate", "genunchi", "inima", "multumesc", "am", "nevoie",
+     "vreau", "doamna", "domnule", "programare", "va", "rog", "eu", "sunt"}
+)
 
 
 def _gender(chat: list[Message]) -> str | None:
@@ -1266,6 +1344,32 @@ def _gender(chat: list[Message]) -> str | None:
         raw = fields_of(row.text).get("gender_preference") or fields_of(row.text).get("gender")
         if raw in {"m", "f"}:
             return raw
+        said = _gender_in_words(row.text)
+        if said:
+            return said
+    return None
+
+
+_FEMALE = re.compile(
+    r"\b(dottoressa|medica|una donna|medico donna|dottore donna|female doctor|woman doctor|"
+    r"a woman|lady doctor|una ginecologa|una specialista)\b"
+)
+_MALE = re.compile(
+    r"\b(medico uomo|dottore uomo|un uomo|male doctor|man doctor|a man)\b"
+)
+
+
+def _gender_in_words(text: str) -> str | None:
+    """Level 3: "preferirei una dottoressa" / "a female doctor". A plain "dottore" is only
+    how people address a doctor, so it says nothing."""
+
+    folded = _fold(text)
+    female = bool(_FEMALE.search(folded))
+    male = bool(_MALE.search(folded))
+    if female and not male:
+        return "f"
+    if male and not female:
+        return "m"
     return None
 
 
@@ -1307,6 +1411,26 @@ _DAY_KEYS = {
 }
 
 
+_DAY_WORDS = {
+    "lunedi": "mon", "monday": "mon", "martedi": "tue", "tuesday": "tue",
+    "mercoledi": "wed", "wednesday": "wed", "giovedi": "thu", "thursday": "thu",
+    "venerdi": "fri", "friday": "fri",
+}
+
+
+def _days_in_words(text: str) -> frozenset[str] | None:
+    """Level 3: "posso solo martedì o giovedì". A day right after a negation is left out."""
+
+    folded = _fold(text)
+    picked: set[str] = set()
+    for match in re.finditer(r"\b(" + "|".join(_DAY_WORDS) + r")\b", folded):
+        before = folded[max(0, match.start() - 14):match.start()]
+        if re.search(r"\b(non|not|no|except|tranne|eccetto|but)\b[^.,;]*$", before):
+            continue
+        picked.add(_DAY_WORDS[match.group(1)])
+    return frozenset(picked) or None
+
+
 def _days(chat: list[Message]) -> frozenset[str] | None:
     """The weekdays the citizen asked for (``days=mon/wed``), if any."""
 
@@ -1315,6 +1439,9 @@ def _days(chat: list[Message]) -> frozenset[str] | None:
             continue
         raw = fields_of(row.text).get("days") or fields_of(row.text).get("day")
         if not raw:
+            said = _days_in_words(row.text)
+            if said:
+                return said
             continue
         picked = {_DAY_KEYS.get(_fold(part)[:3], _DAY_KEYS.get(_fold(part), ""))
                   for part in re.split(r"[/,;|+]", raw)}
