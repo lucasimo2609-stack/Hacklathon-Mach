@@ -903,6 +903,7 @@ def _speaks(doctor_id: str, lang: str) -> bool:
 _RARE_BY_ASST: dict[str, str] = {
     "giambellino": "ka", "toros": "ro", "precotto": "ro", "nord": "ur", "corvetto": "fr",
     "brera": "fa", "isola": "tl", "ortica": "wo", "greco": "si", "bicocca": "ti", "lambrate": "ja",
+    "gorla": "sq", "forlanini": "de",
 }
 _DISTRICT_BY_LANG: dict[str, int] = {"ro": 9, "ur": 2, "fr": 3, "fa": 7, "tl": 8, "wo": 6}
 # Agents of other teams listed on Discord (team -> ids). Add every list that is posted.
@@ -1389,7 +1390,7 @@ async def _gp_for_agent(city: City, message: Message, chat: list[Message]) -> No
             return  # asked once already in this case: no ping-pong with another bot
         await _ack(city, message.sender, "Ricevuto dal medico di base: mi indichi prescription_number= per la verifica.")
         return
-    await _ack(city, message.sender, f"Ricevuto, verifico prescription_number={number} sul registro.")
+    await _ack(city, message.sender, f"Ricevuto, verifico prescription_number={number} sul registro")
     token = f"prescription_number={number}"
     if not _we(chat, agent, token, to=LEDGER, word="prescription"):
         if not await _say(city, LEDGER, f"prescription {token}"):
@@ -1882,7 +1883,22 @@ def _script_lang(text: str) -> str:
         return "ro"
     if len(folded & _TL_WORDS) >= 2:
         return "tl"
+    if len(folded & _DE_WORDS) >= 2:
+        return "de"
+    if len(folded & _SQ_WORDS) >= 2:
+        return "sq"
     return ""
+
+
+_DE_WORDS = frozenset(
+    {"ich", "habe", "rucken", "ruckenschmerzen", "knie", "herz", "termin", "bitte", "danke",
+     "guten", "tag", "brauche", "einen", "arzt", "schmerzen", "mein", "meine", "spreche",
+     "nur", "deutsch"}
+)
+_SQ_WORDS = frozenset(
+    {"pershendetje", "kam", "dhimbje", "shpine", "gju", "zemer", "faleminderit", "mjek",
+     "takim", "une", "jam", "me", "duhet", "ju", "lutem"}
+)
 
 
 _TL_WORDS = frozenset(
@@ -3161,6 +3177,10 @@ async def _on_confirm(
             parts.append(f"cross_asst_consent_ref={cross}")  # MACH-1
         if number:
             parts.append(f"prescription_number={number}")
+        # MACH-1.1: echo the request_id of our need.request (we use the need id).
+        request_id = offer.get("request_id") or message.need_id
+        if request_id:
+            parts.append(f"request_id={request_id}")
         if not await _say(city, via, " ".join(parts)):
             await _facility_down(city, chat, citizen, via, offer_id, message)
         return
@@ -3550,7 +3570,7 @@ async def _partner_request(
     if now is None or world is None:
         # No fresh copy: acknowledge right away, then read the Ledger.
         tail = f" request_id={request_id}" if request_id else ""
-        await _ack(city, partner, f"Ricevuto, verifico subito la disponibilità per procedure={procedure}{tail}.")
+        await _ack(city, partner, f"Ricevuto, verifico subito la disponibilità per procedure={procedure}{tail} .")
         if not _exact(chat, agent, "agenda"):
             await _say(city, LEDGER, "agenda")
         if not _asked(chat, agent, procedure, 1):
@@ -3607,7 +3627,7 @@ async def _partner_request(
         return
     offers = []
     for slot in slots:
-        line = _offer_line({**slot, "facility": agent}, None, priority)
+        line = _offer_line({**slot, "facility": agent}, None, priority).replace("+00:00", "")  # MACH-1.1: ISO, no zone
         # No doctor_lang / doctor_gender: the citizen checks them in the registry, and the
         # format agreed with the other teams on Discord carries doctor_id only.
         offers.append(f"{line} request_id={request_id}" if request_id else line)
@@ -3844,12 +3864,19 @@ async def _on_committed(city: City, message: Message, chat: list[Message]) -> No
     extra = ""
     if target.startswith("agent:") and slot:
         # MACH-1: a partner's booking centre matches the receipt to its offer.
-        offer_id = ""
-        for row in chat:
-            for line in row.text.splitlines():
-                if f"slot_id={slot}" in line.split():
-                    offer_id = fields_of(line).get("offer_id", offer_id)
+        offer = _offer_to(chat, city.agent_id, target, slot)
+        offer_id = offer.get("offer_id", "")
+        if not offer_id:
+            for row in chat:
+                for line in row.text.splitlines():
+                    if f"slot_id={slot}" in line.split():
+                        offer_id = fields_of(line).get("offer_id", offer_id)
         extra = f" slot_id={slot}" + (f" offer_id={offer_id}" if offer_id else "")
+        # MACH-1.1: the partner can forward the receipt without further lookups.
+        extra += f" facility={city.agent_id}"
+        for key in ("request_id", "doctor_id", "agenda_date"):
+            if offer.get(key):
+                extra += f" {key}={offer[key].replace('+00:00', '')}"
     await _say(city, target, f"booking.receipt booking_id={booking_id} ledger_ref={ledger_ref}{extra}")
 
 
@@ -3876,9 +3903,20 @@ async def _on_refused(
         # Pass the Ledger's refusal code on, so the booking centre can act on it (P1 renewal,
         # P3 reserve, consent) instead of guessing.
         code = re.search(r"\b[A-Z][A-Z_]{3,}\b", message.text)
-        extra = f" code={code.group(0)}" if code else ""
-        # Reasons agreed on Discord: a P2 refusal is rule_p2_no_consent for every team.
-        reason = "rule_p2_no_consent" if code and code.group(0) == "CONSENT_MISSING" else "hold_refused"
+        ledger_code = code.group(0) if code else ""
+        # MACH-1.1 reasons (code kept as code= for MACH-1 readers and as ledger_code=).
+        extra = f" code={ledger_code} ledger_code={ledger_code}" if ledger_code else ""
+        if ledger_code == "CONSENT_MISSING":
+            reason = "consent_missing"
+        elif any(word in ledger_code for word in ("TAKEN", "HELD", "BOOKED", "NO_CAPACITY", "CONFLICT")):
+            reason = "slot_taken"
+        elif ledger_code in {"EXPIRED", "PAST", "SLOT_PAST", "TOO_LATE"}:
+            reason = "expired"
+        else:
+            reason = "hold_refused"
+        request_id = _offer_to(chat, agent, target, slot).get("request_id", "") if target.startswith("agent:") else ""
+        if request_id:
+            extra += f" request_id={request_id}"
         await _say(city, target, f"cancel offer_id={offer_id} reason={reason}{extra}")
         # A partner ASST's booking centre loses its citizen if it has to start over: offer the
         # next free slots of ours at once (not for a refusal another slot cannot fix).
