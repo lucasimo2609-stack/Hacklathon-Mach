@@ -1371,14 +1371,20 @@ async def _advance_alone(
                 for row in chat
             ):
                 await _say(city, LEDGER, f"prescription prescription_number={number}")
-            if not _exact(chat, agent, "agenda"):
+            if _agenda_now() is None and not _exact(chat, agent, "agenda"):
                 await _say(city, LEDGER, "agenda")
+            # Speed: fetch the slot lists of the two prescribed procedures NOW, in parallel with
+            # the prescription check, instead of one round trip after the other.
+            for guess in _PREFETCH:
+                if not _asked(chat, agent, guess, 1):
+                    await _say(city, LEDGER, f"world procedure={guess} page=1")
             current = number
             chat = await _until(
                 city,
                 message.need_id,
                 chat,
-                lambda rows: _rx_line(rows, current) is not None and _has_agenda(rows),
+                lambda rows: _rx_line(rows, current) is not None
+                and (_has_agenda(rows) or _agenda_now() is not None),
             )
             continue
         if not procedure:
@@ -1403,25 +1409,29 @@ async def _advance_alone(
                 await _ask_renewal(city, chat, citizen, number)
             return
         agenda = _ledger(chat, "agenda")
-        now = _when("" if agenda is None else agenda.get("agenda_now", ""))
-        world = _latest_slots(chat)
+        now = _when("" if agenda is None else agenda.get("agenda_now", "")) or _agenda_now()
+        world = _slots_for(chat, agent, procedure)
         if now is not None and world is not None:
             break
         if _pass == 2:
             return
         if now is None and not _exact(chat, agent, "agenda"):
             await _say(city, LEDGER, "agenda")
-        if world is None and not _asked(chat, agent, procedure, 1):
+        if world is None and _world_asks(chat, agent, procedure) < 2 and (
+            not _asked(chat, agent, procedure, 1) or _pass == 1
+        ):
             await _say(city, LEDGER, f"world procedure={procedure} page=1")
+        wanted = procedure
         chat = await _until(
             city,
             message.need_id,
             chat,
-            lambda rows: _has_agenda(rows) and _latest_slots(rows) is not None,
+            lambda rows: (_has_agenda(rows) or _agenda_now() is not None)
+            and _slots_for(rows, agent, wanted) is not None,
         )
     else:
         # Our world has no slot list for this procedure at all: the answer is in a partner.
-        if procedure and fixed is None and _asked(chat, agent, procedure, 1) and _latest_slots(chat) is None:
+        if procedure and fixed is None and _asked(chat, agent, procedure, 1) and _slots_for(chat, agent, procedure) is None:
             await _go_partner(
                 city, chat, citizen, procedure, priority, number, {agent}, message.need_id
             )
@@ -1478,6 +1488,45 @@ async def _advance_alone(
     # Nothing fits in our ASST: try a partner of the ring (with consent), else the waiting list.
     own = {fields_of(line).get("facility", "") for line in lines} | {agent}
     await _go_partner(city, chat, citizen, procedure, priority, number, own, message.need_id)
+
+
+_PREFETCH = ("VIS-FIS", "VIS-CARD")
+
+
+def _world_asks(chat: list[Message], agent: str, procedure: str) -> int:
+    token = f"procedure={procedure}"
+    return sum(
+        1 for row in chat
+        if row.sender == agent and row.recipient == LEDGER and row.text.startswith("world ")
+        and token in row.text.split()
+    )
+
+
+def _slots_for(chat: list[Message], agent: str, procedure: str) -> str | None:
+    """The latest slot list the Ledger sent for THIS procedure. With prefetching, several
+    lists arrive in the same case; a list is matched by the procedure its slot lines name.
+    An empty list is ours only when it is the one answer left unmatched."""
+
+    replies = [row for row in chat if row.sender == LEDGER and first_word(row.text) == "slots"]
+    matched: set[str] = set()
+    empty: list[Message] = []
+    for row in reversed(replies):
+        lines = row.text.splitlines()
+        named = {fields_of(line).get("procedure") for line in lines if "slot_id=" in line} - {None}
+        head = fields_of(lines[0] if lines else "").get("procedure")
+        if procedure in named or head == procedure:
+            return row.text
+        matched |= named | ({head} if head else set())
+        if not named and not head:
+            empty.append(row)
+    asked = {
+        fields_of(row.text).get("procedure")
+        for row in chat
+        if row.sender == agent and row.recipient == LEDGER and row.text.startswith("world ")
+    } - {None}
+    if empty and procedure in asked and len(asked - matched) == 1:
+        return empty[0].text
+    return None
 
 
 def _rx_line(chat: list[Message], number: str | None) -> dict[str, str] | None:
