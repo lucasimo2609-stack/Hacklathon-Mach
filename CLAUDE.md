@@ -85,6 +85,15 @@ verdict line; read agent Log tabs; check level on the public board. Fix only cle
 reproducible causes, add a test scenario, run all suites, push, deploy only affected agents one
 at a time.
 
+## State (21 Nov, early)
+
+- Specialist **1.0.5 live** (roll-out took 6m42s, then passed conformance): report consent as
+  `data.request` naming its consent_ref, any yes counts, silence -> report filed unshared after
+  20 s, one checkin/consent line per booking, `care.update` to our GP with consent.
+- Booking centre still 1.0.7 live; repo brain has the clock / cancel-loop / cross-ASST batching
+  / 5-offer fixes (card 1.0.8): deploy it next, 5 min after any other deploy.
+- `city deploy` on Windows: set `PYTHONIOENCODING=utf-8 PYTHONUTF8=1` or it crashes printing.
+
 ## State at handoff (20 Nov, ~23:30)
 
 - Live: GP 1.0.4, booking 1.0.5, consultorio 1.0.3 (all with the world-format fix);
