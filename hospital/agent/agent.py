@@ -132,10 +132,59 @@ def _own_street(city: City) -> str:
         return ""
 
 
+_EN_WORDS = frozenset(
+    {"i", "my", "the", "have", "need", "pain", "hello", "hi", "please", "could", "would", "since", "doctor"}
+)
+
+
+def _english(text: str) -> bool:
+    """A citizen who writes in English gets the friendly sentence in English."""
+
+    return len(words(text) & _EN_WORDS) >= 2
+
+
+def _escalation(text: str) -> str:
+    if _english(text):
+        return (
+            "escalate.emergency reason=red_flag This needs urgent attention: please call 112 "
+            "now or go to the nearest emergency room. Do not wait for an appointment."
+        )
+    return (
+        "escalate.emergency reason=red_flag Questo richiede attenzione urgente: chiami subito "
+        "il 112 o vada al pronto soccorso più vicino. Non aspetti un appuntamento."
+    )
+
+
+def _rx_note(text: str) -> str:
+    """Next step, kind and practical, after the protocol tokens. No diagnosis, no dose."""
+
+    if _english(text):
+        return (
+            "Thank you for writing. With this prescription number you can book the visit at "
+            "the booking centre, who will show you the available times. If you need an "
+            "interpreter or help getting there, just tell them."
+        )
+    return (
+        "Grazie per averci scritto. Con questo numero di ricetta può prenotare la visita al "
+        "centro prenotazioni, che le proporrà gli orari disponibili. Se le serve un "
+        "interprete o un aiuto per raggiungere la struttura, basta dirlo."
+    )
+
+
 async def handle(role: str, city: City, message: Message, chat: list[Message]) -> None:
     street = _own_street(city)
     if street and _asks_address(message):
         await city.say(message.sender, f"address={street}")
+        return
+    # The consultorio and the booking centre are also front doors: a red flag there is
+    # escalated by whoever holds the case first, not only by the GP.
+    if (
+        role in {"booking_centre", "family_counseling"}
+        and message.sender.startswith("citizen:")
+        and _emergency(message)
+    ):
+        if not _we(chat, city.agent_id, "escalate.emergency", to=message.sender, word="escalate.emergency"):
+            await _say(city, message.sender, _escalation(message.text))
         return
     if role == "gp":
         await _gp(city, message, chat)
@@ -433,7 +482,7 @@ async def _gp(city: City, message: Message, chat: list[Message]) -> None:
         return
     if _emergency(message):
         if not _we(chat, agent, "escalate.emergency", to=message.sender, word="escalate.emergency"):
-            await _say(city, message.sender, "escalate.emergency reason=red_flag")
+            await _say(city, message.sender, _escalation(message.text))
         return
     code = _symptom(message)
     if code is None:
@@ -458,7 +507,7 @@ async def _gp(city: City, message: Message, chat: list[Message]) -> None:
     await _say(
         city,
         message.sender,
-        f"prescription {token} procedure={procedure} priority={priority}",
+        f"prescription {token} procedure={procedure} priority={priority} {_rx_note(message.text)}",
     )
 
 
@@ -483,6 +532,8 @@ async def _announce(city: City, message: Message, chat: list[Message], agent: st
         parts.append(f"procedure={procedure}")
     if priority:
         parts.append(f"priority={priority}")
+    first = next((row.text for row in chat if row.sender == citizen), "")
+    parts.append(_rx_note(first))
     await _say(city, citizen, " ".join(parts))
 
 
