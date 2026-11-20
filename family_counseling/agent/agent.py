@@ -1796,7 +1796,9 @@ async def _advance_alone(
                 for row in chat
             ):
                 await _say(city, LEDGER, f"prescription prescription_number={number}")
-            if _agenda_now() is None and not _exact(chat, agent, "agenda"):
+            # Always one fresh agenda reading per case: the extrapolated clock drifts when the
+            # city changes its pace (journey ...095 got slots that were already past).
+            if not _exact(chat, agent, "agenda"):
                 await _say(city, LEDGER, "agenda")
             # Speed: fetch the slot lists of the two prescribed procedures NOW, in parallel with
             # the prescription check, instead of one round trip after the other.
@@ -1808,8 +1810,7 @@ async def _advance_alone(
                 city,
                 message.need_id,
                 chat,
-                lambda rows: _rx_line(rows, current) is not None
-                and (_has_agenda(rows) or _agenda_now() is not None),
+                lambda rows: _rx_line(rows, current) is not None and _has_agenda(rows),
             )
             continue
         if not procedure:
@@ -1834,7 +1835,7 @@ async def _advance_alone(
                 await _ask_renewal(city, chat, citizen, number)
             return
         agenda = _ledger(chat, "agenda")
-        now = _when("" if agenda is None else agenda.get("agenda_now", "")) or _agenda_now()
+        now = _latest_now(_when("" if agenda is None else agenda.get("agenda_now", "")))
         world = _slots_for(chat, agent, procedure)
         if now is not None and world is not None:
             break
@@ -1866,6 +1867,26 @@ async def _advance_alone(
     # A cancel drops every offer the citizen was holding, so the ones still free are sent again,
     # once per cancel: a second turn for the same cancel or refusal does not repeat them.
     sent = _sent(key)
+    rejecting = message.sender == citizen and _is_rejection(message)
+    if rejecting:
+        # The citizen turned our times down ("non mi va bene", cancel reason=past). Never send
+        # the same slots again: offer different ones once per offer message, else the waiting
+        # list. A burst of cancels (one per offer line) is answered once.
+        latest = _latest_offer_row(chat, agent, citizen)
+        if latest is None or sent.trigger == latest.msg_id or _answered(chat, agent, message):
+            return
+        sent.trigger = latest.msg_id
+        if "past" in message.text.lower() or fields_of(message.text).get("reason") == "past":
+            # Our clock was behind: read the agenda again before choosing.
+            known = sum(1 for row in chat if row.sender == LEDGER and first_word(row.text) == "agenda")
+            await _say(city, LEDGER, "agenda")
+            chat = await _until(
+                city, message.need_id, chat,
+                lambda rows: sum(1 for row in rows if row.sender == LEDGER and first_word(row.text) == "agenda") > known,
+            )
+            _remember(chat)
+            agenda = _ledger(chat, "agenda")
+            now = _latest_now(_when("" if agenda is None else agenda.get("agenda_now", ""))) or now
     if replacing:
         trigger = fields_of(message.text).get("offer_id") or message.msg_id
         if sent.trigger != trigger:
@@ -1875,6 +1896,8 @@ async def _advance_alone(
     else:
         taken = _offered(chat, agent) | sent.offers
     lines = [line for line in world.splitlines() if "slot_id=" in line]
+    if rejecting:
+        replacing = True  # skip the "already offered" guard below: these are new slots
     common = dict(
         now=now,
         priority=priority,
@@ -1905,6 +1928,9 @@ async def _advance_alone(
             for row in latest
         ):
             return
+    if rejecting and not chosen:
+        await _waiting_list(city, chat, citizen, message.need_id)
+        return
     if chosen:
         text = "\n".join(_offer_line(slot, number, priority) for slot in chosen)
         if await _say(city, citizen, f"{text}\n{_desk_line('offers', chat)}"):
@@ -1966,10 +1992,43 @@ def _reserved(slot: dict[str, str]) -> bool:
     return False
 
 
+_REJECT = re.compile(
+    r"\b(cancel|annull\w*|non mi va|non va bene|non posso|non riesco|non mi torna|altr[oaie] "
+    r"(orario|data|giorno)|un altro|diverso|preferirei un|no grazie|nessun[oa]?|"
+    r"doesn'?t work|can'?t make|cannot make|another (time|day|date)|other (time|day)|none of)\b"
+)
+
+
+def _is_rejection(message: Message) -> bool:
+    """A citizen saying no to our times, in tokens (cancel offer_id=… reason=…) or words."""
+
+    text = message.text or ""
+    kind = words(text)
+    if "confirm" in kind or fields_of(text).get("consent_ref"):
+        return False
+    return "cancel" in kind or bool(_REJECT.search(_fold(text)))
+
+
+def _latest_offer_row(chat: list[Message], agent: str, citizen: str) -> Message | None:
+    found = None
+    for row in chat:
+        if row.sender == agent and row.recipient == citizen and _offers_in(row.text):
+            found = row
+    return found
+
+
 async def _offers_again(city: City, chat: list[Message], message: Message) -> None:
-    """Send the citizen our current offers again, with how to choose."""
+    """Send the citizen our current offers again, with how to choose (at most twice: after
+    that the waiting list, never a loop)."""
 
     agent = city.agent_id
+    resent = sum(
+        1 for row in chat
+        if row.sender == agent and row.recipient == message.sender and _offers_in(row.text)
+    )
+    if resent >= 3:
+        await _waiting_list(city, chat, message.sender, message.need_id)
+        return
     latest = ""
     for row in chat:
         if row.sender == agent and row.recipient == message.sender and _offers_in(row.text):
@@ -2544,14 +2603,25 @@ _WORLD_SEEN: dict[str, tuple[float, str]] = {}
 _WORLD_TTL = 20.0
 
 
+_AGENDA_RATE = 60.0  # agenda seconds per real second; learned from successive readings
+
+
 def _remember(chat: list[Message]) -> None:
-    global _AGENDA_SEEN
+    global _AGENDA_SEEN, _AGENDA_RATE
     agenda = _ledger(chat, "agenda")
     when = _when("" if agenda is None else agenda.get("agenda_now", ""))
-    predicted = _agenda_now()
-    # The agenda only moves forward: an old case's agenda line must not pull the clock back.
-    if when is not None and (predicted is None or when > predicted - timedelta(minutes=30)):
-        _AGENDA_SEEN = (time.monotonic(), when)
+    # The agenda only moves forward: an old case's agenda line (same or earlier instant) never
+    # resets the clock. Two different readings teach the real pace (the city runs at 2x).
+    if when is not None and (_AGENDA_SEEN is None or when > _AGENDA_SEEN[1]):
+        real_now = time.monotonic()
+        if _AGENDA_SEEN is not None:
+            seen, before = _AGENDA_SEEN
+            elapsed = real_now - seen
+            if elapsed >= 5.0:
+                rate = (when - before).total_seconds() / elapsed
+                if 20.0 <= rate <= 1000.0:
+                    _AGENDA_RATE = rate
+        _AGENDA_SEEN = (real_now, when)
     for row in chat[-3:]:  # only fresh answers: an old case's slot list may be long gone
         if _is_world_reply(row):
             text = _normalize_world(row.text)
@@ -2567,7 +2637,22 @@ def _agenda_now() -> datetime | None:
     if _AGENDA_SEEN is None:
         return None
     seen, when = _AGENDA_SEEN
-    return when + timedelta(seconds=(time.monotonic() - seen) * 60)
+    return when + timedelta(seconds=(time.monotonic() - seen) * _AGENDA_RATE)
+
+
+def _latest_now(case_now: datetime | None) -> datetime | None:
+    """The agenda instant to plan with: the later of this case's reading and the learned clock
+    (a case's reading gets old while the citizen thinks; the clock never runs backwards)."""
+
+    clock = _agenda_now()
+    if case_now is None:
+        return clock
+    if clock is None:
+        return case_now
+    try:
+        return max(case_now, clock)
+    except TypeError:  # naive vs aware: trust the case
+        return case_now
 
 
 def _world_now(procedure: str) -> str | None:
