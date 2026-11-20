@@ -552,7 +552,21 @@ def _speaks(doctor_id: str, lang: str) -> bool:
         return False
     if doctor_id.startswith(_OWN_ASST + "-"):
         return lang == _RARE_LANG
+    known = _RARE_BY_ASST.get(_asst_of(doctor_id))
+    if known is not None:
+        return lang == known
     return True
+
+
+# Rare languages of partner ASSTs, as the teams told us on Discord. ASST name (from doctor ids
+# like asst-toros-h3) -> language of its "*" doctor, and the district its agents sit in.
+_RARE_BY_ASST: dict[str, str] = {"giambellino": "ka", "toros": "ro"}
+_DISTRICT_BY_LANG: dict[str, int] = {"ro": 9}
+
+
+def _asst_of(doctor_id: str) -> str:
+    parts = doctor_id.split("-")
+    return parts[1] if len(parts) >= 3 and parts[0] == "asst" else ""
 
 
 def fitting(
@@ -1990,6 +2004,10 @@ async def _go_partner(
         except CapError:
             peers = []
         family = service.split(".", 1)[0]
+        # The ASST known to have the citizen's rare language goes first (Discord table).
+        target = _DISTRICT_BY_LANG.get(_lang(chat))
+        if target is not None:
+            peers = sorted(peers, key=lambda peer: 0 if getattr(peer, "district", None) == target else 1)
         partners = [
             peer
             for peer in peers
@@ -2441,10 +2459,8 @@ async def _partner_request(city: City, message: Message, chat: list[Message]) ->
     offers = []
     for slot in slots:
         line = _offer_line({**slot, "facility": agent}, None, priority)
-        spec = _DOCTORS.get(slot.get("doctor_id", "").rsplit("-", 1)[-1])
-        if spec is not None:
-            langs = sorted(_RARE_LANG if lang == "*" else lang for lang in spec[0])
-            line = f"{line} doctor_lang={'/'.join(langs)} doctor_gender={spec[1]}"
+        # No doctor_lang / doctor_gender: the citizen checks them in the registry, and the
+        # format agreed with the other teams on Discord carries doctor_id only.
         offers.append(f"{line} request_id={request_id}" if request_id else line)
     await _say(city, partner, "\n".join(offers))
 
