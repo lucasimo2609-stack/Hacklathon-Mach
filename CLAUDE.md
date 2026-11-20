@@ -63,6 +63,7 @@ $PY -I tests/gp_test.py gp/agent          # symptom phrasings, expect failures: 
 $PY -I tests/gp_test2.py gp/agent         # red flags + negation, languages
 $PY -I tests/gp_flow.py gp/agent          # follow-up / resend / after red flag
 $PY -I tests/gp_protocol.py gp/agent      # procedure + priority match the protocol table
+$PY -I tests/gp_access.py gp/agent tests/bc_test.py   # access needs GP->booking->facility, injections
 $PY -I tests/bc_test.py booking_centre/agent            # 9 booking scenarios
 $PY -I tests/bc_fix.py booking_centre/agent tests/bc_test.py
 $PY -I tests/bc_world.py booking_centre/agent tests/bc_test.py   # real world format
@@ -71,6 +72,7 @@ $PY -I tests/bc_offers.py booking_centre/agent tests/bc_test.py  # up to 5 offer
 $PY -I tests/bc_clock.py booking_centre/agent tests/bc_test.py   # fresh clock, no cancel loop
 $PY -I tests/bc_cross.py booking_centre/agent tests/bc_test.py   # partner offers in ONE message
 $PY -I tests/sp_test.py specialist/agent
+$PY -I tests/sp_flow.py specialist/agent     # report consent, silence, GP care.update
 $PY -I tests/h_test.py hospital/agent hospital
 $PY -I tests/h_desk.py hospital/agent hospital
 $PY -I tests/h_alt.py hospital/agent tests/h_desk.py
