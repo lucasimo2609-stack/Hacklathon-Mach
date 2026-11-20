@@ -560,8 +560,11 @@ def _speaks(doctor_id: str, lang: str) -> bool:
 
 # Rare languages of partner ASSTs, as the teams told us on Discord. ASST name (from doctor ids
 # like asst-toros-h3) -> language of its "*" doctor, and the district its agents sit in.
-_RARE_BY_ASST: dict[str, str] = {"giambellino": "ka", "toros": "ro", "nord": "ur", "corvetto": "fr"}
-_DISTRICT_BY_LANG: dict[str, int] = {"ro": 9, "ur": 2, "fr": 3}
+_RARE_BY_ASST: dict[str, str] = {
+    "giambellino": "ka", "toros": "ro", "precotto": "ro", "nord": "ur", "corvetto": "fr",
+    "brera": "fa", "isola": "tl",
+}
+_DISTRICT_BY_LANG: dict[str, int] = {"ro": 9, "ur": 2, "fr": 3, "fa": 7, "tl": 8}
 # Agents of other teams listed on Discord (team -> ids). Add every list that is posted.
 _TRUSTED_AGENTS: set[str] = {
     # asst-nord, team agentic-paguri
@@ -1325,7 +1328,7 @@ _LANG_NAMES = {
     "francais": "fr", "chinese": "zh", "cinese": "zh", "russian": "ru", "russo": "ru",
     "ukrainian": "uk", "ucraino": "uk", "albanian": "sq", "albanese": "sq", "portuguese": "pt",
     "portoghese": "pt", "german": "de", "tedesco": "de", "polish": "pl", "polacco": "pl",
-    "tagalog": "tl", "filipino": "tl", "bengali": "bn", "urdu": "ur", "hindi": "hi",
+    "tagalog": "tl", "filipino": "tl", "farsi": "fa", "persiano": "fa", "persian": "fa", "bengali": "bn", "urdu": "ur", "hindi": "hi",
     "turkish": "tr", "turco": "tr", "amharic": "am", "tigrinya": "ti", "wolof": "wo",
 }
 _LANG_ASK = re.compile(
@@ -1345,6 +1348,11 @@ def _script_lang(text: str) -> str:
     if re.search(r"[\u10a0-\u10ff]", text):
         return "ka"
     if re.search(r"[\u0600-\u06ff]", text):
+        # Persian letters (پ چ ژ گ ک ی) tell farsi from arabic; Urdu adds ٹ ڈ ڑ ں ے.
+        if re.search(r"[\u0679\u0688\u0691\u06ba\u06d2]", text):
+            return "ur"
+        if re.search(r"[\u067e\u0686\u0698\u06af\u06a9\u06cc]", text):
+            return "fa"
         return "ar"
     if re.search(r"[\u4e00-\u9fff]", text):
         return "zh"
@@ -1353,7 +1361,15 @@ def _script_lang(text: str) -> str:
     folded = {_fold(word) for word in words(text.replace("'", " "))}
     if len(folded & _RO_WORDS) >= 2:
         return "ro"
+    if len(folded & _TL_WORDS) >= 2:
+        return "tl"
     return ""
+
+
+_TL_WORDS = frozenset(
+    {"kumusta", "masakit", "ang", "ko", "po", "salamat", "likod", "tuhod", "puso", "kailangan",
+     "ako", "doktor", "magandang", "araw", "opo", "hindi"}
+)
 
 
 _RO_WORDS = frozenset(
