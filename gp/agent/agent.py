@@ -60,8 +60,8 @@ _RX = re.compile(r"^prescription_number-[A-Z0-9-]{4,40}$")
 _LOG = logging.getLogger("care")
 # The Relay accepts a ledger reply and then the agent rejects the push, so the reply sits in
 # the case history and never opens a turn. Wait briefly and read it back from history.
-_PULL_TRIES = 24
-_PULL_PAUSE = 0.25
+_PULL_TRIES = 60
+_PULL_PAUSE = 0.1  # same 6 s budget, but a Ledger answer is seen within 0.1 s
 # Needs whose sent offers this process remembers; the oldest is forgotten first.
 _SENT_NEEDS = 4096
 
@@ -275,6 +275,7 @@ def _rx_note(text: str) -> str:
 
 
 async def handle(role: str, city: City, message: Message, chat: list[Message]) -> None:
+    _remember(chat)  # keep the agenda and world copies warm for fast partner answers
     street = _own_street(city)
     if street and _asks_address(message):
         await city.say(message.sender, f"address={street}")
@@ -735,6 +736,9 @@ async def _gp(city: City, message: Message, chat: list[Message]) -> None:
     if message.sender == LEDGER:
         await _announce(city, message, chat, agent)
         return
+    if message.sender.startswith("agent:"):
+        await _gp_for_agent(city, message, chat)
+        return
     if not message.sender.startswith("citizen:"):
         return
     if _emergency(message):
@@ -790,6 +794,32 @@ async def _gp(city: City, message: Message, chat: list[Message]) -> None:
         message.sender,
         f"prescription {token} procedure={procedure} priority={priority} {_rx_note(message.text)}",
     )
+
+
+async def _gp_for_agent(city: City, message: Message, chat: list[Message]) -> None:
+    """Another agent writes to the GP (a booking centre checking a prescription, a partner).
+    Answer within the fast-reply window, and verify the prescription on the Ledger if named.
+    Never shares anything beyond the prescription's own protocol fields."""
+
+    agent = city.agent_id
+    number = fields_of(message.text).get("prescription_number", "")
+    if not number:
+        await _ack(city, message.sender, "Ricevuto dal medico di base: mi indichi prescription_number= per la verifica.")
+        return
+    await _ack(city, message.sender, f"Ricevuto, verifico prescription_number={number} sul registro.")
+    token = f"prescription_number={number}"
+    if not _we(chat, agent, token, to=LEDGER, word="prescription"):
+        if not await _say(city, LEDGER, f"prescription {token}"):
+            return
+    found = await _await_line(city, message.need_id, chat, "prescription", token, op="prescription")
+    if found is None or first_word(found[0].text) != "prescription":
+        return
+    fields = fields_of(found[0].text)
+    parts = [f"Verifica: {token}"]
+    for key in ("procedure", "priority", "state"):
+        if fields.get(key):
+            parts.append(f"{key}={fields[key]}")
+    await _say(city, message.sender, " ".join(parts))
 
 
 def _fresh_rx(need_id: str | None, msg_id: str, tag: str) -> str:
@@ -1662,6 +1692,13 @@ async def _on_confirm(
         message.sender if message.sender.startswith("citizen:") else ""
     )
     number = fields.get("prescription_number") or offer.get("prescription_number")
+    if message.sender.startswith("agent:") and not _we(chat, agent, f"slot_id={slot}", to=LEDGER, word="hold"):
+        # A booking centre (ours or a partner's) is waiting on us: answer at once, then book.
+        await _ack(
+            city,
+            message.sender,
+            f"Ricevuto: blocco subito slot_id={slot} e invio la ricevuta firmata appena registrata.",
+        )
     via = offer.get("via", "")
     book_here = not via and (hold_self or message.sender.startswith("agent:") or facility == agent)
     if via and message.sender.startswith("citizen:"):
@@ -1792,6 +1829,49 @@ def _facility_turn(message: Message) -> bool:
 
 _ROLE_NAMES = {"hospital": "hospital", "specialist_care": "specialist", "family_counseling": "family_counseling"}
 
+# Speed: the agenda clock runs 60x real time, so one reading is enough to know "now" for a
+# while; a world page stays good for a few seconds. Partners get offers without Ledger trips.
+_AGENDA_SEEN: tuple[float, datetime] | None = None
+_WORLD_SEEN: dict[str, tuple[float, str]] = {}
+_WORLD_TTL = 20.0
+
+
+def _remember(chat: list[Message]) -> None:
+    global _AGENDA_SEEN
+    agenda = _ledger(chat, "agenda")
+    when = _when("" if agenda is None else agenda.get("agenda_now", ""))
+    if when is not None:
+        _AGENDA_SEEN = (time.monotonic(), when)
+    for row in chat:
+        if row.sender == LEDGER and first_word(row.text) == "slots":
+            procedure = next(
+                (fields_of(line).get("procedure") for line in row.text.splitlines() if "slot_id=" in line),
+                None,
+            )
+            if procedure:
+                _WORLD_SEEN[procedure] = (time.monotonic(), row.text)
+
+
+def _agenda_now() -> datetime | None:
+    if _AGENDA_SEEN is None:
+        return None
+    seen, when = _AGENDA_SEEN
+    return when + timedelta(seconds=(time.monotonic() - seen) * 60)
+
+
+def _world_now(procedure: str) -> str | None:
+    hit = _WORLD_SEEN.get(procedure)
+    if hit is None or time.monotonic() - hit[0] > _WORLD_TTL:
+        return None
+    return hit[1]
+
+
+async def _ack(city: City, to: str, text: str) -> None:
+    """Answer another agent at once (the fast-reply window is about 10 s); the real answer
+    follows. Plain words only: no act word, so no partner mistakes it for an offer."""
+
+    await _say(city, to, text)
+
 
 async def _partner_request(city: City, message: Message, chat: list[Message]) -> None:
     """Another ASST's booking centre asks for our slots (search criteria only). Answer fast
@@ -1807,17 +1887,25 @@ async def _partner_request(city: City, message: Message, chat: list[Message]) ->
         return
     if any(row.sender == agent and row.recipient == partner for row in chat):
         return  # already answered this request
-    if not _exact(chat, agent, "agenda"):
-        await _say(city, LEDGER, "agenda")
-    if not _asked(chat, agent, procedure, 1):
-        await _say(city, LEDGER, f"world procedure={procedure} page=1")
-    chat = await _until(
-        city, message.need_id, chat,
-        lambda rows: _has_agenda(rows) and _latest_slots(rows) is not None,
-    )
-    agenda = _ledger(chat, "agenda")
-    now = _when("" if agenda is None else agenda.get("agenda_now", ""))
-    world = _latest_slots(chat)
+    _remember(chat)
+    now = _agenda_now()
+    world = _world_now(procedure)
+    if now is None or world is None:
+        # No fresh copy: acknowledge right away, then read the Ledger.
+        tail = f" request_id={request_id}" if request_id else ""
+        await _ack(city, partner, f"Ricevuto, verifico subito la disponibilità per procedure={procedure}{tail}.")
+        if not _exact(chat, agent, "agenda"):
+            await _say(city, LEDGER, "agenda")
+        if not _asked(chat, agent, procedure, 1):
+            await _say(city, LEDGER, f"world procedure={procedure} page=1")
+        chat = await _until(
+            city, message.need_id, chat,
+            lambda rows: _has_agenda(rows) and _latest_slots(rows) is not None,
+        )
+        _remember(chat)
+        agenda = _ledger(chat, "agenda")
+        now = _when("" if agenda is None else agenda.get("agenda_now", "")) or _agenda_now()
+        world = _latest_slots(chat)
     mine = {agent, _ROLE_NAMES.get(role_of(), "")} - {""}
     slots: list[dict[str, str]] = []
     if now is not None and world is not None:
