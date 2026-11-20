@@ -924,8 +924,10 @@ async def _gp_for_agent(city: City, message: Message, chat: list[Message]) -> No
     Never shares anything beyond the prescription's own protocol fields."""
 
     agent = city.agent_id
-    number = fields_of(message.text).get("prescription_number", "")
+    number = fields_of(message.text).get("prescription_number", "") or _number_in_words(message.text) or ""
     if not number:
+        if any(row.sender == agent and row.recipient == message.sender for row in chat):
+            return  # asked once already in this case: no ping-pong with another bot
         await _ack(city, message.sender, "Ricevuto dal medico di base: mi indichi prescription_number= per la verifica.")
         return
     await _ack(city, message.sender, f"Ricevuto, verifico prescription_number={number} sul registro.")
@@ -2747,7 +2749,16 @@ async def _partner_request(
                 break
             if slot not in slots:
                 slots.append(slot)
-        slots = [s for s in slots if s.get("slot_id") not in exclude and not _recently_held(s.get("slot_id", ""))][:6]
+        slots = [s for s in slots if s.get("slot_id") not in exclude and not _recently_held(s.get("slot_id", ""))]
+        # Many teams now ask every partner at once: spread our slots so two partners rarely
+        # pick the same one (a collision costs them a refused hold and us a retry).
+        turn = _recent_partners(partner)
+        if slots and turn:
+            shift = turn % len(slots)
+            slots = slots[shift:] + slots[:shift]  # each partner sees a different first choice
+        slots = sorted(slots, key=lambda s: _offered_to_others(s.get("slot_id", ""), partner))[:6]
+        for s in slots:
+            _note_partner_offer(s.get("slot_id", ""), partner)
     if not slots:
         tail = f" request_id={request_id}" if request_id else ""
         await _say(city, partner, f"cancel reason=no_availability procedure={procedure}{tail}")
@@ -2806,6 +2817,32 @@ async def _facility(
     elif message.sender.startswith("citizen:") and not _answered(chat, city.agent_id, message):
         # Never silent at the desk: a question we have no branch for still gets an answer.
         await _say(city, message.sender, _desk_line("desk", chat))
+    elif _unknown_agent_message(message, chat, city.agent_id):
+        # Another team's agent wrote something we have no branch for: answer once, fast
+        # (+1 fast reply) and tell it how to ask. Plain words only, no act word, so no loop.
+        await _say(city, message.sender, _how_to_ask())
+
+
+def _unknown_agent_message(message: Message, chat: list[Message], agent: str) -> bool:
+    if not message.sender.startswith("agent:") or message.sender == agent:
+        return False
+    if words(message.text) & {"offer", "cancel", "booking.receipt", "report", "checkin", "confirm"}:
+        return False
+    # Once per partner and case: their answer to our help text must not start a ping-pong.
+    return not any(row.sender == agent and row.recipient == message.sender for row in chat)
+
+
+def _how_to_ask() -> str:
+    service = {
+        "hospital": "hospital.physiatry procedure=VIS-FIS",
+        "specialist_care": "specialist_care.cardiology procedure=VIS-CARD (o CTRL-CARD)",
+        "family_counseling": "family_counseling.gynecology procedure=CONS-GIN",
+    }.get(role_of(), "")
+    return (
+        "Ciao dalla ASST Giambellino. Per chiederci posti scrivete: need.request "
+        f"service_type={service} priority=U|B|D|P request_id=<id>. Rispondiamo in pochi "
+        "secondi con tutte le disponibilità in un solo messaggio."
+    ).replace("need.request", "need-request")
 
 
 _ARRIVAL = re.compile(
@@ -3017,6 +3054,30 @@ async def _on_refused(
 
 _OWN_BOOKING = "agent:cdc7x6m21nj6"
 _HELD: dict[str, float] = {}
+
+
+_PARTNER_OFFERED: dict[str, dict[str, float]] = {}
+
+
+def _note_partner_offer(slot_id: str, partner: str) -> None:
+    if slot_id:
+        _PARTNER_OFFERED.setdefault(slot_id, {})[partner] = time.monotonic()
+
+
+def _recent_partners(partner: str) -> int:
+    """Other partners we offered slots to in the last 60 real seconds."""
+
+    now = time.monotonic()
+    return len({who for seen in _PARTNER_OFFERED.values() for who, at in seen.items()
+                if who != partner and now - at < 60})
+
+
+def _offered_to_others(slot_id: str, partner: str) -> int:
+    """How many OTHER partners got this slot in the last 60 real seconds (0 sorts first)."""
+
+    now = time.monotonic()
+    seen = _PARTNER_OFFERED.get(slot_id, {})
+    return sum(1 for who, at in seen.items() if who != partner and now - at < 60)
 
 
 def _recently_held(slot_id: str) -> bool:
