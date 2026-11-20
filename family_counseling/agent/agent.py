@@ -16,7 +16,7 @@ import time
 import unicodedata
 from collections import OrderedDict
 from collections.abc import Callable
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
 
@@ -299,6 +299,9 @@ def _rx_note(text: str) -> str:
 
 
 async def handle(role: str, city: City, message: Message, chat: list[Message]) -> None:
+    if message.sender == LEDGER and first_word(message.text) in {"world", "slots", "agenda", "refused", "prescription"}:
+        # Diagnosis: the real Ledger formats show up in the console Log tab.
+        _LOG.warning("ledger %s: %s", first_word(message.text), message.text[:600].replace("\n", " | "))
     _remember(chat)  # keep the agenda and world copies warm for fast partner answers
     street = _own_street(city)
     if street and _asks_address(message):
@@ -386,12 +389,17 @@ def fields_of(text: str) -> dict[str, str]:
 
 
 def _when(value: str) -> datetime | None:
+    value = (value or "").strip()
+    if not value:
+        return None
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00").replace(" ", "T", 1))
     except ValueError:
         return None
     if parsed.tzinfo is None:
-        return None
+        # The agenda clock and the slots use the same zone; a time without one is read as UTC
+        # on both sides, so comparisons stay right (a naive time used to drop every slot).
+        parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed
 
 
@@ -1020,19 +1028,113 @@ async def _announce(city: City, message: Message, chat: list[Message], agent: st
 # --- centro prenotazioni and consultorio -------------------------------------------------------
 
 
+_STAMP = re.compile(
+    r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?"
+)
+
+
 def _ledger(chat: list[Message], head: str) -> dict[str, str] | None:
     found: dict[str, str] | None = None
+    raw = ""
     for row in chat:
         if row.sender == LEDGER and first_word(row.text) == head:
             found = fields_of(row.text)
+            raw = row.text
+    if found is not None and head == "agenda" and "agenda_now" not in found:
+        # Whatever the key is called (now=, time=, date= + hour=), keep the agenda instant.
+        for key in ("now", "agenda_time", "time", "datetime", "at"):
+            if _when(found.get(key, "")) is not None:
+                found["agenda_now"] = found[key]
+                break
+        else:
+            stamp = _STAMP.search(raw)
+            if stamp:
+                found["agenda_now"] = stamp.group(0)
+            elif found.get("date") and (found.get("hour") or found.get("time")):
+                found["agenda_now"] = f"{found['date']}T{found.get('hour') or found.get('time')}"
     return found
+
+
+# Our own facilities by name, for world lines that name a facility instead of its agent id.
+_OWN_FACILITIES = {
+    "hospital": "agent:h6r1v45esk77",
+    "specialist": "agent:hnpe58epeyh1",
+    "specialist_care": "agent:hnpe58epeyh1",
+    "family_counseling": "agent:bzs050xacs1m",
+    "consultorio": "agent:bzs050xacs1m",
+}
+_BY_PROCEDURE = {
+    "VIS-FIS": "agent:h6r1v45esk77",
+    "VIS-CARD": "agent:hnpe58epeyh1",
+    "CTRL-CARD": "agent:hnpe58epeyh1",
+    "CONS-GIN": "agent:bzs050xacs1m",
+}
+_WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+
+def _is_world_reply(row: Message) -> bool:
+    if row.sender != LEDGER:
+        return False
+    head = first_word(row.text)
+    if head == "slots":
+        return True
+    return head == "world" and ("slot_id=" in row.text or "slots=" in row.text or "page=" in row.text)
+
+
+def _normalize_world(text: str) -> str:
+    """One shape for every world answer: a head line (page=…), then one line per slot with
+    slot_id, doctor_id, facility (an agent id), procedure, at (ISO), day (mon…), free."""
+
+    parts = re.split(r"(?=\bslot_id=)", text)
+    head = fields_of(parts[0]) if parts else {}
+    lines = ["slots " + " ".join(f"{k}={v}" for k, v in head.items())]
+    for part in parts[1:]:
+        f = fields_of(part)
+        slot_id = f.get("slot_id")
+        if not slot_id:
+            continue
+        procedure = f.get("procedure") or head.get("procedure", "")
+        at = ""
+        for key in ("at", "agenda_date", "start", "starts_at", "datetime", "when", "time"):
+            if _when(f.get(key, "")) is not None:
+                at = f[key]
+                break
+        if not at and f.get("date") and (f.get("hour") or f.get("time")):
+            at = f"{f['date']}T{f.get('hour') or f.get('time')}"
+        if not at:
+            stamp = _STAMP.search(part)
+            at = stamp.group(0) if stamp else ""
+        when = _when(at)
+        day = (f.get("day") or f.get("agenda_day") or f.get("weekday") or "").lower()
+        day = _DAY_KEYS.get(_fold(day)[:3], day[:3]) if day else ""
+        if not day and when is not None:
+            day = _WEEKDAYS[when.weekday()]
+        facility = f.get("facility") or f.get("facility_id") or f.get("struttura") or ""
+        if not facility.startswith("agent:"):
+            name = facility.lower()
+            facility = next(
+                (aid for key, aid in _OWN_FACILITIES.items() if key in name),
+                facility or _BY_PROCEDURE.get(procedure, ""),
+            )
+        free = f.get("free") or f.get("posti") or f.get("seats") or f.get("capacity") or ""
+        extra = {k: v for k, v in f.items() if "reserv" in k.lower() or "riserv" in k.lower()}
+        line = (
+            f"slot_id={slot_id} doctor_id={f.get('doctor_id') or f.get('doctor', '')} "
+            f"facility={facility} procedure={procedure} at={when.isoformat() if when else at} day={day}"
+        )
+        if free:
+            line += f" free={free}"
+        for k, v in extra.items():
+            line += f" {k}={v}"
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def _latest_slots(chat: list[Message]) -> str | None:
     found: str | None = None
     for row in chat:
-        if row.sender == LEDGER and first_word(row.text) == "slots":
-            found = row.text
+        if _is_world_reply(row):
+            found = _normalize_world(row.text)
     return found
 
 
@@ -1236,6 +1338,13 @@ _DESK_SAY: dict[str, dict[str, str]] = {
         "en": "Our ASST has no suitable slot for you. We can look in a nearby ASST: to do that "
         "we need your permission to share the booking details with that facility. Is that OK?",
     },
+    "cross_again": {
+        "it": "Mi scusi, provo a spiegarmi meglio: nella nostra ASST non ci sono posti. Posso "
+        "cercare la visita in un'ASST vicina condividendo con loro solo i dati necessari alla "
+        "prenotazione. Mi risponda semplicemente sì oppure no.",
+        "en": "Sorry, let me be clearer: our ASST has no slots. I can look for the visit in a "
+        "nearby ASST, sharing only the data needed for the booking. Just answer yes or no.",
+    },
     "searching": {
         "it": "Grazie. Stiamo chiedendo le disponibilità all'altra ASST: le mando gli orari "
         "appena arrivano.",
@@ -1370,6 +1479,8 @@ async def _desk(
         if pending:
             # The citizen answered our booking-consent question: book the offer they chose.
             consent = fields_of(message.text).get("consent_ref", "")
+            if not consent and _consent_answer(message) == "yes":
+                consent = f"cons-{message.need_id}-booking"
             if consent:
                 chosen = Message(
                     type=message.type,
@@ -1647,7 +1758,7 @@ def _pending_booking_consent(chat: list[Message], agent: str, message: Message) 
 
     for row in reversed(chat):
         if row.sender == agent and row.recipient == message.sender and "purpose=booking" in row.text.split() \
-                and first_word(row.text) == "consent":
+                and first_word(row.text) in {"consent", "data.request"}:
             offer_id = fields_of(row.text).get("offer_id", "")
             if offer_id and not _we(chat, agent, f"offer_id={offer_id}", to=message.sender, word="booking.receipt"):
                 return offer_id
@@ -1672,18 +1783,18 @@ def _slots_for(chat: list[Message], agent: str, procedure: str) -> str | None:
     lists arrive in the same case; a list is matched by the procedure its slot lines name.
     An empty list is ours only when it is the one answer left unmatched."""
 
-    replies = [row for row in chat if row.sender == LEDGER and first_word(row.text) == "slots"]
+    replies = [_normalize_world(row.text) for row in chat if _is_world_reply(row)]
     matched: set[str] = set()
-    empty: list[Message] = []
-    for row in reversed(replies):
-        lines = row.text.splitlines()
-        named = {fields_of(line).get("procedure") for line in lines if "slot_id=" in line} - {None}
+    empty: list[str] = []
+    for text in reversed(replies):
+        lines = text.splitlines()
+        named = {fields_of(line).get("procedure") for line in lines if "slot_id=" in line} - {None, ""}
         head = fields_of(lines[0] if lines else "").get("procedure")
         if procedure in named or head == procedure:
-            return row.text
+            return text
         matched |= named | ({head} if head else set())
         if not named and not head:
-            empty.append(row)
+            empty.append(text)
     asked = {
         fields_of(row.text).get("procedure")
         for row in chat
@@ -1692,7 +1803,7 @@ def _slots_for(chat: list[Message], agent: str, procedure: str) -> str | None:
     unmatched = asked - matched
     # Every unmatched request has its (empty) answer: our ASST has no slot for this procedure.
     if empty and procedure in unmatched and len(empty) >= len(unmatched):
-        return empty[0].text
+        return empty[0]
     return None
 
 
@@ -1870,7 +1981,7 @@ async def _go_partner(
     if not asked:
         await _waiting_list(city, chat, citizen, need_id)
         return
-    await _say(city, citizen, "consent purpose=cross_asst " + _desk_line("cross", chat))
+    await _say(city, citizen, "data.request purpose=cross_asst fields=consent " + _desk_line("cross", chat))
 
 
 def _rank_partner_offers(
@@ -1896,21 +2007,57 @@ def _rank_partner_offers(
     return picked
 
 
+_YES = re.compile(r"\b(si|sì|ok|okay|va bene|certo|d'accordo|daccordo|accetto|acconsento|yes|sure|agree|consento|perfetto)\b")
+_NO = re.compile(r"\b(no|non|preferisco di no|rifiuto|nego|not|don't|dont|never|mai|nope)\b")
+
+
+def _consent_answer(row: Message) -> str:
+    """yes / no / unclear for a citizen's answer to a consent question. A refusal comes in
+    plain words; a yes may come as consent consent_ref=…, data.response, or plain words."""
+
+    fields = fields_of(row.text)
+    kind = words(row.text)
+    if fields.get("offer_id") or "confirm" in kind:
+        return ""
+    if fields.get("consent_ref"):
+        return "yes"
+    folded = _fold(row.text)
+    if "data.response" in kind and not _NO.search(folded):
+        return "yes"
+    if _NO.search(folded):
+        return "no"
+    if _YES.search(folded):
+        return "yes"
+    return "unclear"
+
+
 async def _cross_turn(city: City, message: Message, chat: list[Message], citizen: str) -> None:
     agent = city.agent_id
     after = _since_cross(chat, agent, citizen)
     consent = ""
     refused = False
+    unclear = False
     for row in after:
+        verdict = _consent_answer(row)
         fields = fields_of(row.text)
-        if fields.get("consent_ref") and not fields.get("offer_id"):
-            consent = fields["consent_ref"]
-        elif not fields.get("consent_ref") and "confirm" not in words(row.text):
+        if verdict == "yes":
+            consent = fields.get("consent_ref") or fields.get("provided_ref") or f"cons-{message.need_id}-cross_asst"
+        elif verdict == "no":
             refused = True
+        elif verdict == "unclear":
+            unclear = True
     if not consent:
         if refused:
-            # A "no" comes in plain words: book nothing outside, offer the waiting list.
+            # A clear "no": book nothing outside, offer the waiting list.
             await _waiting_list(city, chat, citizen, message.need_id)
+        elif unclear and message.sender == citizen:
+            asks = sum(1 for row in chat if row.sender == agent and "purpose=cross_asst" in row.text.split())
+            if asks < 2:
+                # The citizen did not understand ("Which consent_ref?"): ask once more, plainly.
+                await _say(city, citizen, "data.request purpose=cross_asst fields=consent "
+                           + _desk_line("cross_again", chat))
+            else:
+                await _waiting_list(city, chat, citizen, message.need_id)
         return
     rx = _rx_line(chat, _number(chat)) or {}
     priority = rx.get("priority")
@@ -1965,11 +2112,11 @@ async def _on_confirm(
     if from_citizen and slot and not consent:
         # Fix 1: the choice is clear but the booking consent is missing: ask for it, once.
         oid = offer_id or offer.get("offer_id", "") or f"of-{slot}"
-        if not _we(chat, agent, f"offer_id={oid}", to=message.sender, word="consent"):
+        if not _we(chat, agent, f"offer_id={oid}", to=message.sender, word="data.request"):
             await _say(
                 city,
                 message.sender,
-                f"consent purpose=booking offer_id={oid} slot_id={slot} " + _desk_line("consent", chat),
+                f"data.request purpose=booking fields=consent offer_id={oid} slot_id={slot} " + _desk_line("consent", chat),
             )
         return
     if not slot or not consent:
@@ -2144,16 +2291,19 @@ def _remember(chat: list[Message]) -> None:
     global _AGENDA_SEEN
     agenda = _ledger(chat, "agenda")
     when = _when("" if agenda is None else agenda.get("agenda_now", ""))
-    if when is not None:
+    predicted = _agenda_now()
+    # The agenda only moves forward: an old case's agenda line must not pull the clock back.
+    if when is not None and (predicted is None or when > predicted - timedelta(minutes=30)):
         _AGENDA_SEEN = (time.monotonic(), when)
-    for row in chat:
-        if row.sender == LEDGER and first_word(row.text) == "slots":
+    for row in chat[-3:]:  # only fresh answers: an old case's slot list may be long gone
+        if _is_world_reply(row):
+            text = _normalize_world(row.text)
             procedure = next(
-                (fields_of(line).get("procedure") for line in row.text.splitlines() if "slot_id=" in line),
+                (fields_of(line).get("procedure") for line in text.splitlines() if "slot_id=" in line),
                 None,
             )
             if procedure:
-                _WORLD_SEEN[procedure] = (time.monotonic(), row.text)
+                _WORLD_SEEN[procedure] = (time.monotonic(), text)
 
 
 def _agenda_now() -> datetime | None:
