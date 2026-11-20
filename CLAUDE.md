@@ -90,8 +90,9 @@ at a time.
 - Specialist **1.0.5 live** (roll-out took 6m42s, then passed conformance): report consent as
   `data.request` naming its consent_ref, any yes counts, silence -> report filed unshared after
   20 s, one checkin/consent line per booking, `care.update` to our GP with consent.
-- Booking centre still 1.0.7 live; repo brain has the clock / cancel-loop / cross-ASST batching
-  / 5-offer fixes (card 1.0.8): deploy it next, 5 min after any other deploy.
+- Booking centre **1.0.9 live** (deployed 00:19 from 984bad6): clock read per case + pace
+  learned, no cancel loop, cross-ASST partner offers in ONE message, up to 5 offers.
+- Watch next: Journeys for report rows (+2 expected now) and booking wrong_outcome (should stop).
 - `city deploy` on Windows: set `PYTHONIOENCODING=utf-8 PYTHONUTF8=1` or it crashes printing.
 
 ## State at handoff (20 Nov, ~23:30)
