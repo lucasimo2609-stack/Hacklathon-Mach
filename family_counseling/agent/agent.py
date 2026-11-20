@@ -560,8 +560,24 @@ def _speaks(doctor_id: str, lang: str) -> bool:
 
 # Rare languages of partner ASSTs, as the teams told us on Discord. ASST name (from doctor ids
 # like asst-toros-h3) -> language of its "*" doctor, and the district its agents sit in.
-_RARE_BY_ASST: dict[str, str] = {"giambellino": "ka", "toros": "ro", "nord": "ur"}
-_DISTRICT_BY_LANG: dict[str, int] = {"ro": 9, "ur": 2}
+_RARE_BY_ASST: dict[str, str] = {"giambellino": "ka", "toros": "ro", "nord": "ur", "corvetto": "fr"}
+_DISTRICT_BY_LANG: dict[str, int] = {"ro": 9, "ur": 2, "fr": 3}
+# Agents of other teams listed on Discord (team -> ids). Add every list that is posted.
+_TRUSTED_AGENTS: set[str] = {
+    # asst-nord, team agentic-paguri
+    "agent:gpr1zqe343gb", "agent:zand0f57ec1j", "agent:ccjzqm7yekwx",
+    # asst-lambrate, team LTF-JECATT
+    "agent:gdrf9b9kxxss", "agent:c2ewegr2ea3v", "agent:nanpr5mgm2py", "agent:pky3vqyqbepa",
+    "agent:atp772whjkgd",
+}
+# Partner facilities with no rare language known yet: asked on every cross-ASST search too.
+_KNOWN_FACILITIES: dict[str, str] = {
+    "agent:nanpr5mgm2py": "hospital.physiatry",          # Lambrate
+    "agent:pky3vqyqbepa": "specialist_care.cardiology",  # Lambrate
+    "agent:atp772whjkgd": "family_counseling.gynecology",  # Lambrate
+}
+_STRICT_PARTNERS = os.environ.get("CITY_STRICT_PARTNERS", "") == "1"
+
 # Partner facilities the teams gave us on Discord (service -> agent id), by rare language.
 # They are asked first for that language, and always asked, even if the Index misses them.
 _PARTNER_AGENTS: dict[str, dict[str, str]] = {
@@ -2174,7 +2190,10 @@ async def _go_partner(
         for code, by_service in sorted(_PARTNER_AGENTS.items(), key=lambda item: item[0] != lang)
         if service in by_service and by_service[service] not in own
     ]
-    for agent_id in known_first + [peer.agent_id for peer in partners]:
+    known_rest = [
+        agent_id for agent_id, svc in _KNOWN_FACILITIES.items() if svc == service and agent_id not in own
+    ]
+    for agent_id in known_first + [peer.agent_id for peer in partners] + known_rest:
         if agent_id not in seen_ids:
             seen_ids.add(agent_id)
             unique.append(agent_id)
@@ -2193,15 +2212,27 @@ async def _go_partner(
     await _say(city, citizen, "data.request purpose=cross_asst fields=consent " + _desk_line("cross", chat))
 
 
+def _trusted(agent_id: str) -> bool:
+    """A partner agent a team listed on Discord. From 21 Nov impostor agents join the map:
+    an unknown agent's offers go last, and with CITY_STRICT_PARTNERS=1 they are dropped."""
+
+    return agent_id in _TRUSTED_AGENTS
+
+
 def _rank_partner_offers(
     offers: list[tuple[str, dict[str, str]]], lang: str
 ) -> list[tuple[str, dict[str, str]]]:
-    """Offers whose language the partner confirmed first, then one per partner, then earliest."""
+    """Language confirmed first, then trusted partners, one per partner, then earliest."""
 
-    def key(item: tuple[str, dict[str, str]]) -> tuple[int, str]:
+    if _STRICT_PARTNERS:
+        offers = [item for item in offers if _trusted(item[0])]
+
+    def key(item: tuple[str, dict[str, str]]) -> tuple[int, int, str]:
         langs = _partner_langs(item[1])
         confirmed = 0 if langs is not None and lang in langs else 1
-        return confirmed, item[1].get("agenda_date") or item[1].get("at") or ""
+        if langs is None and _RARE_BY_ASST.get(_asst_of(item[1].get("doctor_id", ""))) == lang:
+            confirmed = 0  # the Discord table says this partner's h3 speaks the language
+        return confirmed, (0 if _trusted(item[0]) else 1), item[1].get("agenda_date") or item[1].get("at") or ""
 
     ordered = sorted(offers, key=key)
     picked: list[tuple[str, dict[str, str]]] = []
