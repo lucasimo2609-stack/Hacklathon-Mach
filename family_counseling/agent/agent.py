@@ -484,6 +484,12 @@ def _rx(need_id: str | None, msg_id: str) -> str:
     return number if _RX.fullmatch(number) else "prescription_number-CASE"
 
 
+_OWN_ASST = os.environ.get("CITY_ASST", "asst-giambellino")
+# Our "*" doctor (h3) speaks Georgian only, not every rare language. A partner's "*" doctor
+# speaks that partner's rare language, which we do not know: that one stays a wildcard.
+_RARE_LANG = os.environ.get("CITY_RARE_LANG", "ka")
+
+
 def _speaks(doctor_id: str, lang: str) -> bool:
     spec = _DOCTORS.get(doctor_id.rsplit("-", 1)[-1])
     if spec is None:
@@ -491,7 +497,11 @@ def _speaks(doctor_id: str, lang: str) -> bool:
     langs = spec[0]
     if lang in langs:
         return True
-    return "*" in langs and lang not in {"it", "en"}
+    if "*" not in langs or lang in {"it", "en"}:
+        return False
+    if doctor_id.startswith(_OWN_ASST + "-"):
+        return lang == _RARE_LANG
+    return True
 
 
 def fitting(
@@ -1869,11 +1879,29 @@ def _facility_turn(message: Message) -> bool:
         return True
     if "checkin" in kind and message.sender.startswith("citizen:"):
         return True
-    if "need.request" in kind and message.sender.startswith("agent:"):
+    if _is_partner_request(message):
         return True
     return "confirm" in kind and (
         message.sender.startswith("agent:") or message.sender.startswith("citizen:")
     )
+
+
+_NOT_A_REQUEST = {"confirm", "offer", "cancel", "booking.receipt", "checkin", "report", "consent"}
+
+
+def _is_partner_request(message: Message) -> bool:
+    """Another team's booking centre asking for slots. Teams phrase it differently: the act
+    word need.request, or just the search tokens (procedure= / service_type=)."""
+
+    if not message.sender.startswith("agent:"):
+        return False
+    kind = words(message.text)
+    if kind & _NOT_A_REQUEST:
+        return False
+    if "need.request" in kind:
+        return True
+    tokens = fields_of(message.text)
+    return bool(tokens.get("procedure") or tokens.get("service_type"))
 
 
 _ROLE_NAMES = {"hospital": "hospital", "specialist_care": "specialist", "family_counseling": "family_counseling"}
@@ -1930,8 +1958,17 @@ async def _partner_request(city: City, message: Message, chat: list[Message]) ->
     partner = message.sender
     fields = fields_of(message.text)
     procedure = fields.get("procedure", "")
+    if not procedure:
+        # Some partners send only service_type=hospital.physiatry and no procedure.
+        service = fields.get("service_type", "")
+        procedure = next(
+            (code for code, svc in _SERVICE.items() if svc == service and code != "CTRL-CARD"), ""
+        )
     priority = fields.get("priority") or None
+    if priority not in {"U", "B", "D", "P"}:
+        priority = None
     request_id = fields.get("request_id", "")
+    want_lang = (fields.get("lang") or fields.get("language") or "").lower()
     if not procedure:
         return
     if any(row.sender == agent and row.recipient == partner for row in chat):
@@ -1959,11 +1996,30 @@ async def _partner_request(city: City, message: Message, chat: list[Message]) ->
     slots: list[dict[str, str]] = []
     if now is not None and world is not None:
         lines = [line for line in world.splitlines() if "slot_id=" in line]
-        slots = [
+        ours = [
             slot
-            for slot in fitting(lines, now=now, priority=priority, lang="it", procedure=procedure)
+            for slot in fitting(lines, now=now, priority=priority, lang=want_lang or "it", procedure=procedure)
             if slot.get("facility", "") in mine
-        ][:3]
+        ]
+        if not ours and want_lang:
+            ours = [
+                slot
+                for slot in fitting(lines, now=now, priority=priority, lang="it", procedure=procedure)
+                if slot.get("facility", "") in mine
+            ]
+        # One slot per doctor first: a partner usually comes to us for a doctor it lacks
+        # (often our Georgian-speaking h3), not for our earliest hour.
+        seen: set[str] = set()
+        for slot in ours:
+            if slot.get("doctor_id") not in seen:
+                seen.add(slot.get("doctor_id", ""))
+                slots.append(slot)
+        for slot in ours:
+            if len(slots) >= 6:
+                break
+            if slot not in slots:
+                slots.append(slot)
+        slots = slots[:6]
     if not slots:
         tail = f" request_id={request_id}" if request_id else ""
         await _say(city, partner, f"cancel reason=no_availability procedure={procedure}{tail}")
@@ -1971,6 +2027,10 @@ async def _partner_request(city: City, message: Message, chat: list[Message]) ->
     offers = []
     for slot in slots:
         line = _offer_line({**slot, "facility": agent}, None, priority)
+        spec = _DOCTORS.get(slot.get("doctor_id", "").rsplit("-", 1)[-1])
+        if spec is not None:
+            langs = sorted(_RARE_LANG if lang == "*" else lang for lang in spec[0])
+            line = f"{line} doctor_lang={'/'.join(langs)} doctor_gender={spec[1]}"
         offers.append(f"{line} request_id={request_id}" if request_id else line)
     await _say(city, partner, "\n".join(offers))
 
@@ -2010,7 +2070,7 @@ async def _facility(
         and _report_asked(chat, city.agent_id, message.sender)
     ):
         await _on_report_consent(city, message, chat)
-    elif "need.request" in kind and message.sender.startswith("agent:") and "confirm" not in kind:
+    elif _is_partner_request(message):
         await _partner_request(city, message, chat)
     elif "confirm" in kind:
         await _on_confirm(city, message, chat, hold_self=hold_self)
