@@ -1591,7 +1591,9 @@ def _slots_for(chat: list[Message], agent: str, procedure: str) -> str | None:
         for row in chat
         if row.sender == agent and row.recipient == LEDGER and row.text.startswith("world ")
     } - {None}
-    if empty and procedure in asked and len(asked - matched) == 1:
+    unmatched = asked - matched
+    # Every unmatched request has its (empty) answer: our ASST has no slot for this procedure.
+    if empty and procedure in unmatched and len(empty) >= len(unmatched):
         return empty[0].text
     return None
 
