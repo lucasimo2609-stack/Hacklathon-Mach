@@ -895,6 +895,10 @@ def _speaks(doctor_id: str, lang: str) -> bool:
     known = _RARE_BY_ASST.get(_asst_of(doctor_id))
     if known is not None:
         return lang == known
+    # An ASST not in our table: if the table already names who speaks this language, it is
+    # not this one (journeys ...141/...151/...172: a German speaker got Bovisa's h3).
+    if lang in _RARE_BY_ASST.values():
+        return False
     return True
 
 
