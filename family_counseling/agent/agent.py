@@ -3791,6 +3791,17 @@ async def _on_confirm(
             f"Ricevuto: blocco subito slot_id={slot} e invio la ricevuta firmata appena registrata.",
         )
     via = offer.get("via", "")
+    if message.sender.startswith("agent:") and not via:
+        # MACH-1.2: a duplicate confirm gets the same receipt, never a second hold.
+        sent = [
+            row for row in chat
+            if row.sender == agent and row.recipient == message.sender
+            and "booking.receipt" in words(row.text) and f"slot_id={slot}" in row.text.split()
+        ]
+        if sent:
+            if _once(f"dup-confirm:{message.msg_id}"):
+                await _say(city, message.sender, sent[-1].text)
+            return
     book_here = not via and (hold_self or message.sender.startswith("agent:") or facility == agent)
     if via and message.sender.startswith("citizen:"):
         # A partner ASST's slot: the partner holds it, with the citizen's cross-ASST consent.
@@ -4452,8 +4463,21 @@ async def _partner_request(
     relaxed: dict[str, str] = {}
     if not procedure:
         return
-    if not request and any(row.sender == agent and row.recipient == partner for row in chat):
-        return  # already answered this request
+    if not request:
+        # MACH-1.2 idempotency (level 7 sends duplicates on purpose): the same request_id gets
+        # the same answer again; a new request_id (a partner's second round) a fresh one.
+        previous = [
+            row for row in chat
+            if row.sender == agent and row.recipient == partner
+            and (not request_id or f"request_id={request_id}" in row.text.split())
+            and words(row.text) & {"offer", "cancel"}
+        ]
+        if previous:
+            if request_id and _once(f"dup-request:{message.msg_id}"):
+                await _say(city, partner, previous[-1].text)
+            return
+        if not request_id and any(row.sender == agent and row.recipient == partner for row in chat):
+            return  # already answered this request
     _remember(chat)
     now = _agenda_now()
     world = _world_now(procedure)

@@ -74,7 +74,7 @@ Backward compatible with MACH-1 / 1.1. Full text: `MACH-1.2.md` on Discord. What
   - Idempotent per (need, offer); graders (`city:review/clock/audit/emergency`) and Ledger
     `world/agenda/…` replies are never notices. Consultorio rebooks the citizen directly.
   - Not done yet: `rebook_of=` priority for partner requests (we already answer at once).
-- **Idempotency (L7, todo):** same `request_id` → same offers; same `offer_id` confirm → same
+- **Idempotency (L7, done on facilities):** same `request_id` → same offers; same `offer_id` confirm → same
   receipt, never a second hold; never a receipt without a successful `commit` (−2).
 - **Soft lock (L7):** a slot offered to one `request_id` is not offered to another for 60 real
   seconds; the Ledger's first `hold` wins, others get `cancel reason=slot_taken` + alternatives.
@@ -154,6 +154,7 @@ $PY -I tests/chaos.py hospital/agent       # 1,275 odd/failing turns: no crash, 
 $PY -I tests/bc_rebook.py booking_centre/agent tests/bc_test.py   # L6: cancel + new offers in ONE message
 $PY -I tests/h_rebook.py hospital/agent hospital  # L6 facility side: cancel + alternatives
 $PY -I tests/bc_ring.py booking_centre/agent tests/bc_test.py    # rare language partner, round 2, no empty promise
+$PY -I tests/h_l7.py hospital/agent hospital      # L7: duplicate request -> same offers, duplicate confirm -> same receipt
 ```
 
 All must pass before any deploy.
