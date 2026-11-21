@@ -49,7 +49,23 @@ async def main():
     pages = [t for to, t in c.out if to == LEDGER and t.startswith("world procedure=VIS-FIS")]
     offers = [o["slot_id"] for to, t in c.out if to == CIT for o in A._offers_in(t)]
     check("pages: no page beyond 1 asked when page 1 passes the deadline", all("page=1" in t for t in pages), str(pages))
-    check("pages: offers from page 1", set(offers) == {"Q1", "Q2"}, str(offers))
+    # 21 Nov 12:50: B/D keep an 8 h lead (74 offers refused reason=past: the citizen answers
+    # 5-15 agenda hours later). Q1 is 5.5 h after 08:00 -> only Q2 for priority B.
+    check("pages: B gets page-1 slots at least 8 h ahead (Q2, not same-day Q1)", set(offers) == {"Q2"}, str(offers))
+
+    # 1b. U is unchanged: the same-day slot is the point of an urgent prescription
+    class SortedU(Sorted):
+        def ledger(s, text):
+            if text.split()[0] == "prescription":
+                f = A.fields_of(text)
+                s.add(LEDGER, BC, f"prescription prescription_number={f['prescription_number']} procedure=VIS-FIS priority=U state=issued")
+            else:
+                Sorted.ledger(s, text)
+    A._AGENDA_SEEN = None
+    c = SortedU(slots=[])
+    await say(c, CIT, "prenoto prescription_number=rx-1")
+    offers = [o["slot_id"] for to, t in c.out if to == CIT for o in A._offers_in(t)]
+    check("U: same-day slot (5.5 h ahead) still offered, next day not", offers == ["Q1"], str(offers))
 
     peers = [Peer(agent_id=x, role="facility", capabilities=("hospital.physiatry",)) for x in (PA, PB)]
     # 2. A partner answers 1 s after the consent: offers, not the waiting list

@@ -27,7 +27,10 @@ ROLES = ("booking_centre", "gp", "hospital", "specialist_care", "family_counseli
 _MAX_PAGE = 20  # pages start at the world's first week: the current week can be far in
 # Four agenda hours is about half a minute of real time at 480x, so a slot is still
 # ahead when the citizen decides. One hour was already past by then.
-_LEAD_PLANNED = timedelta(hours=2)  # 6 h broke level-4 scarcity tests (same-day slots); keep 2 h
+# B/D/P: 8 h. Between our offer and the citizen's answer pass 5-15 real minutes = 5-15 agenda
+# hours: with 2 h, 74 offers in wave W01QQQ were refused with reason=past (21 Nov 12:50).
+# U keeps _LEAD (same-day slots are the point of U).
+_LEAD_PLANNED = timedelta(hours=8)
 _LEAD = timedelta(hours=2)  # level 4 (scarcity): keep same-day slots; the chain takes seconds
 # Doctor key (the last segment of doctor_id) -> languages, gender, days. ``*`` is the ASST's
 # rare language. The Ledger's slot line names the doctor; it does not repeat this table.
@@ -1050,13 +1053,42 @@ def _exact(chat: list[Message], agent: str, text: str) -> bool:
     return any(row.sender == agent and row.text.strip() == text for row in chat)
 
 
+try:  # the SDK's HTTP client; only its "never connected" errors are safe to retry
+    import httpx as _httpx
+
+    _NEVER_SENT: tuple[type[BaseException], ...] = (_httpx.ConnectError, _httpx.ConnectTimeout)
+except ImportError:  # pragma: no cover - the SDK always ships httpx
+    _NEVER_SENT = (ConnectionRefusedError,)
+_SEND_RETRY_PAUSE = 0.5
+
+
 async def _say(city: City, to: str, text: str) -> bool:
-    try:
-        await city.say(to, text)
-    except CapError:
-        return False
-    _TURN_TO.get().add(to)
-    return True
+    for attempt in (1, 2):
+        try:
+            await city.say(to, text)
+        except CapError:
+            return False  # a refusal (4xx, TARGET_NOT_VISIBLE): never retried
+        except _NEVER_SENT as error:
+            # The connection never opened, so the message cannot have arrived: one retry is
+            # safe. Anything ambiguous (a read timeout after sending) is NOT retried: a second
+            # hold/confirm could double a booking.
+            if attempt == 2:
+                _LOG.warning("care.send_failed to=%s %s", to, type(error).__name__)
+                return False
+            await asyncio.sleep(_SEND_RETRY_PAUSE)
+            continue
+        _TURN_TO.get().add(to)
+        return True
+    return False
+
+
+async def _say_all(city: City, to: str, texts: list[str]) -> list[bool]:
+    """Independent messages to one recipient, sent in parallel (answers are read from the case
+    afterwards, so their order does not matter)."""
+
+    if not texts:
+        return []
+    return list(await asyncio.gather(*(_say(city, to, text) for text in texts)))
 
 
 # The Ledger's answer words, as the kit shows them and the other spellings a reply may use.
@@ -3050,22 +3082,26 @@ async def _advance_alone(
                 if _rx_line(chat, current) is None:
                     return
                 continue
+            burst = []
             if not any(
                 row.sender == agent
                 and row.recipient == LEDGER
                 and f"prescription_number={number}" in row.text.split()
                 for row in chat
             ):
-                await _say(city, LEDGER, f"prescription prescription_number={number}")
+                burst.append(f"prescription prescription_number={number}")
             # Always one fresh agenda reading per case: the extrapolated clock drifts when the
             # city changes its pace (journey ...095 got slots that were already past).
             if not _exact(chat, agent, "agenda"):
-                await _say(city, LEDGER, "agenda")
+                burst.append("agenda")
             # Speed: fetch the slot lists of the two prescribed procedures NOW, in parallel with
             # the prescription check, instead of one round trip after the other.
             for guess in _PREFETCH:
                 if not _asked(chat, agent, guess, 1):
-                    await _say(city, LEDGER, f"world procedure={guess} page=1")
+                    burst.append(f"world procedure={guess} page=1")
+            # Independent Ledger questions go out together (21 Nov: each send took 0.1-2 s
+            # under load, four in a row before the citizen's case could move).
+            await _say_all(city, LEDGER, burst)
             current = number
             chat = await _until(
                 city,
@@ -3719,8 +3755,8 @@ def _fits_partner(
         return False  # fail closed: a partner slot without a readable date never reaches a citizen
     if now is None:
         return True
-    if at <= now + _LEAD:
-        return False
+    if at <= now + (_LEAD if priority == "U" else _LEAD_PLANNED):
+        return False  # partner slots too: past by the time the citizen answers
     if priority == "U":
         return at.date() == now.date()
     if priority in _DEADLINE_DAYS:
