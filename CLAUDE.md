@@ -52,9 +52,15 @@ never `city init` or `city retire`.
 - **The first offer list must fit, or the citizen cancels it all and the journey stops.**
   Named days are a hard filter; "only certain days" -> ask days+gender once; an explicit
   language request ("a doctor who speaks English") beats the profile `lang=` token.
-- **Concurrency:** `city scale <agent> --min 1 --max 1 --concurrency 40` (not a deploy, no
-  quota). Keep 1 replica (in-process locks/memory). A deploy may reset it: re-apply after
-  every deploy. Bursts of 20 citizens queued for minutes before this.
+- **Concurrency (21 Nov 13:05):** booking_centre **80**, gp **60**, the facilities 40:
+  `city scale <agent> --min 1 --max 1 --concurrency <n>` (not a deploy, no quota). The platform
+  refuses 100 (`POLICY_VIOLATION concurrency`); 80 is accepted. Booking needs the most: its
+  slow-Ledger and partner waits hold a turn for 10 s-2 min each. Keep 1 replica (in-process
+  locks/memory). A deploy may reset it: re-apply after every deploy. Bursts of 20 citizens
+  queued for minutes at 40.
+- **A dead agent still shows "visible"** in `city status`: after every deploy or scale, read
+  the Log tab (or `/v1/logs?agent_id=…`) for fresh `brain done` lines and no
+  `Finished server process`. Booking was dead 12:21-12:43 on 21 Nov (1.0.28 deploy) unnoticed.
 - **Whole-city latency ~3 min per step** (even the citizens' own replies): not our agents.
 - **Never edit the shared brain while a regression+commit job runs** (`git add -A` picks the
   edit up). Work in a copy outside the repo, apply after. The guard "commit only if TOTAL BAD:
@@ -197,7 +203,7 @@ cd "C:\My Projects\Mach"; git pull
 $env:PYTHONIOENCODING="utf-8"; $env:PYTHONUTF8="1"
 city deploy booking_centre          # 2-8 min, ends "Released ...@1.0.x"
 city status agent:booking_centre    # Deployed Yes visible <version>
-city scale booking_centre --min 1 --max 1 --concurrency 40
+city scale booking_centre --min 1 --max 1 --concurrency 80   # gp: 60, facilities: 40
 git add booking_centre/card.yaml; git commit -m "Deployed booking_centre"; git push
 ```
 
