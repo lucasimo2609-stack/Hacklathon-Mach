@@ -33,19 +33,21 @@ async def run(name, slots, text, want_n, want_docs=None, must=()):
     print("OK " if not problems else "BAD", name, "->", ids, "|", "; ".join(problems))
 
 async def main():
-    many = [sl(1, "mon", "2026-11-02", F, 13), sl(2, "mon", "2026-11-02", F, 15),
+    # 21 Nov: B/D need 8 h of lead (citizens answer 5-15 agenda hours later): the fake clock is
+    # Monday 08:00, so Monday slots start at 16:30 here.
+    many = [sl(1, "mon", "2026-11-02", F, 16), sl(2, "tue", "2026-11-03", F, 13),
             sl(3, "tue", "2026-11-03", F, 9), sl(4, "tue", "2026-11-03", F, 11),
             sl(5, "tue", "2026-11-03", M, 10), sl(6, "tue", "2026-11-03", M, 14),
             sl(7, "tue", "2026-11-03", F, 16)]
     await run("no gender: 7 fitting -> 5", many, "prenoto prescription_number=rx-1", 5)
     await run("female, 5 female + 2 male -> 5 all female", many,
               "prenoto prescription_number=rx-1, preferirei una dottoressa", 5, {F})
-    few = [sl(1, "mon", "2026-11-02", F, 13), sl(3, "tue", "2026-11-03", F, 9),
+    few = [sl(1, "mon", "2026-11-02", F, 16), sl(3, "tue", "2026-11-03", F, 9),
            sl(5, "tue", "2026-11-03", M, 10), sl(6, "tue", "2026-11-03", M, 14),
            sl(8, "mon", "2026-11-02", M, 16)]
     await run("female, 2 female + 3 male -> 3 (both female kept)", few,
               "prenoto prescription_number=rx-1, preferirei una dottoressa", 3, None, ("T1", "T3"))
-    two = [sl(1, "mon", "2026-11-02", F, 13), sl(3, "tue", "2026-11-03", F, 9)]
+    two = [sl(1, "mon", "2026-11-02", F, 16), sl(3, "tue", "2026-11-03", F, 9)]
     await run("only 2 fitting -> 2", two, "prenoto prescription_number=rx-1", 2)
     print("failures:", bad)
     sys.exit(1 if bad else 0)

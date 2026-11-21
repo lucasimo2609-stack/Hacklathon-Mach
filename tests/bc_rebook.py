@@ -48,7 +48,8 @@ async def main():
     await turn(c, CIT, "cancel offer_id=of-S1 reason=past")
     ok(not any("facility_cancelled" in t for t in to_cit(c)), "rejection is not a rebook")
     print("R7 nothing else free -> the citizen still hears it at once")
-    c = FakeCity(slots=[slot(1, "mon", "2026-11-02")]); oid, sid = await booked(c)
+    # 21 Nov: B needs 8 h of lead (fake clock Monday 08:00): the one slot is Tuesday 10:30.
+    c = FakeCity(slots=[slot(1, "tue", "2026-11-03")]); oid, sid = await booked(c)
     await turn(c, HOSP, f"cancel reason=facility_cancelled booking_id=B-1 offer_id={oid}")
     ok(any("reason=facility_cancelled" in t for t in to_cit(c)), "cancel told even with no new slot")
     print("failures:", fails)

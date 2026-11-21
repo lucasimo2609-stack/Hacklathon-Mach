@@ -14,10 +14,11 @@ def check(name, ok, info=""):
 def sl(i, date, hour, doc, day):
     return f"slot_id=P{i} doctor_id={doc} facility={HOSP} procedure=VIS-FIS at={date}T{hour:02d}:30:00+00:00 day={day} free=1"
 
+# 21 Nov: B needs 8 h of lead (fake clock Monday 08:00): this week's Monday slot is 16:30.
 PAGES = {
     1: [sl(1, "2026-10-26", 10, "asst-x-h1", "mon"), sl(2, "2026-10-27", 10, "asst-x-h1", "tue")],      # past week
     2: [sl(3, "2026-11-09", 10, "asst-x-h1", "mon"), sl(4, "2026-11-10", 10, "asst-x-h1", "tue")],      # too late for B
-    3: [sl(5, "2026-11-02", 13, "asst-x-h1", "mon"), sl(6, "2026-11-03", 10, "asst-x-h1", "tue"),
+    3: [sl(5, "2026-11-02", 16, "asst-x-h1", "mon"), sl(6, "2026-11-03", 10, "asst-x-h1", "tue"),
         sl(7, "2026-11-03", 11, "asst-x-h3", "tue")],                                                   # this week
 }
 
