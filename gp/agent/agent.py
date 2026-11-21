@@ -1381,6 +1381,30 @@ def _asst_of(doctor_id: str) -> str:
     return "-".join(parts[1:-1]) if len(parts) >= 3 and parts[0] == "asst" else ""
 
 
+# Learned reply lead (21 Nov, wave W01QQQ: 74 offers cancelled with reason=past). Between our
+# offer and the citizen's answer the city takes 5-15 real minutes, i.e. many agenda hours. When a
+# citizen calls one of our offers past, we learn how far ahead of "now at offer time" that slot
+# was and offer only beyond that from then on (planned priorities; U stays same-day).
+_LEARNED_LEAD = timedelta(0)
+_LEARNED_LEAD_MAX = timedelta(hours=24)
+_OFFER_NOW: OrderedDict[str, datetime] = OrderedDict()
+
+
+def _learn_past(slot_id: str, at: datetime | None) -> None:
+    """A citizen cancelled the slot as past: widen the lead to cover that gap (+1 h)."""
+
+    global _LEARNED_LEAD
+    seen = _OFFER_NOW.get(slot_id)
+    if seen is None or at is None:
+        return
+    try:
+        gap = at - seen
+    except TypeError:
+        return
+    if timedelta(0) < gap <= _LEARNED_LEAD_MAX:
+        _LEARNED_LEAD = min(max(_LEARNED_LEAD, gap + timedelta(hours=1)), _LEARNED_LEAD_MAX)
+
+
 def fitting(
     lines: list[str],
     *,
@@ -1399,7 +1423,7 @@ def fitting(
         horizon = None
     else:
         horizon = _horizon(now, priority or "")
-    earliest = now + (_LEAD if priority == "U" else _LEAD_PLANNED)
+    earliest = now + (_LEAD if priority == "U" else max(_LEAD_PLANNED, _LEARNED_LEAD))
     chosen: list[tuple[datetime, dict[str, str]]] = []
     for line in lines:
         slot = fields_of(line)
@@ -2289,7 +2313,15 @@ def _need_more_pages(text: str, now: datetime, priority: str | None) -> bool:
     elif priority in _DEADLINE_DAYS:
         horizon = _horizon(now, priority)
     else:
-        return len(times) < _OFFERS * 2  # planned visit: enough choice already in hand
+        # Planned visit / consultorio (no deadline): enough choice only counts slots still
+        # ahead of the reply lead. Past ones made a full page 1 look "enough" after the citizen
+        # called it past, and the consultorio answered with a waiting list (W01QQQ ...760002).
+        ahead = now + max(_LEAD_PLANNED, _LEARNED_LEAD)
+        try:
+            future = [when for when in times if when > ahead]
+        except TypeError:
+            future = times
+        return len(future) < _OFFERS * 2
     try:
         return max(times) < horizon
     except TypeError:
@@ -2609,6 +2641,15 @@ def _human_times(values: list[str], chat: list[Message]) -> str:
 
 
 def _offer_line(slot: dict[str, str], number: str | None, priority: str | None) -> str:
+    try:
+        clock = _agenda_now()
+        if clock is not None:
+            _OFFER_NOW[slot["slot_id"]] = clock  # latest offer time wins (smaller, safer gap)
+            _OFFER_NOW.move_to_end(slot["slot_id"])
+            while len(_OFFER_NOW) > 5000:
+                _OFFER_NOW.popitem(last=False)
+    except Exception:  # noqa: BLE001 - learning the lead never breaks an offer
+        pass
     parts = [
         "offer",
         f"offer_id=of-{slot['slot_id']}",
@@ -4821,6 +4862,7 @@ def _past_floor(chat: list[Message], agent: str) -> datetime | None:
             continue
         offer = _our_offer(chat, agent, fields.get("offer_id", ""))
         at = _when(offer.get("agenda_date") or offer.get("at") or "")
+        _learn_past(offer.get("slot_id", ""), at)
         if at is not None and (floor is None or at > floor):
             floor = at
     return floor
@@ -4888,6 +4930,8 @@ def _latest_now(case_now: datetime | None) -> datetime | None:
 
 
 _OWN_TTL = 600.0  # our own booking centre (Ledger slow): a 10-min-old slot copy beats no offer
+_STALE_TTL = 1800.0  # last resort for a partner when the Ledger never answered: 30-min-old copy
+_PARTNER_LEDGER_WAIT = 60.0  # partners wait minutes anyway (MACH-1.4 median 254 s)
 
 
 def _world_now(procedure: str, ttl: float | None = None) -> str | None:
@@ -4963,19 +5007,32 @@ async def _partner_request(
     if now is None or world is None:
         # No fresh copy: acknowledge right away, then read the Ledger.
         tail = f" request_id={request_id}" if request_id else ""
-        await _ack(city, partner, f"Ricevuto, verifico subito la disponibilità per procedure={procedure}{tail} .")
+        # In parallel: the partner's fast reply and both Ledger reads (one round-trip, not three).
+        calls = [_ack(city, partner, f"Ricevuto, verifico subito la disponibilità per procedure={procedure}{tail} .")]
         if not _exact(chat, agent, "agenda"):
-            await _say(city, LEDGER, "agenda")
+            calls.append(_say(city, LEDGER, "agenda"))
         if not _asked(chat, agent, procedure, 1):
-            await _say(city, LEDGER, f"world procedure={procedure} page=1")
-        chat = await _until(
-            city, message.need_id, chat,
-            lambda rows: _has_agenda(rows) and _latest_slots(rows) is not None,
-        )
+            calls.append(_say(city, LEDGER, f"world procedure={procedure} page=1"))
+        await asyncio.gather(*calls)
+        ready = lambda rows: _has_agenda(rows) and _latest_slots(rows) is not None  # noqa: E731
+        chat = await _until(city, message.need_id, chat, ready)
+        if not ready(chat):
+            # Slow Ledger (21 Nov): we answered partners "no_availability" after 6 s without
+            # having seen a single slot, and they dropped us. Keep reading the case; then fall
+            # back on a slot copy up to 30 min old (a taken slot fails at hold, with alternatives).
+            budget = min(_PARTNER_LEDGER_WAIT, _PULL_PAUSE * 600)
+            poll = min(_HOLD_POLL, max(_PULL_PAUSE * 20, 0.001))
+            start = time.monotonic()
+            while time.monotonic() - start < budget and not ready(chat):
+                await asyncio.sleep(poll)
+                try:
+                    chat = await city.history(need_id=message.need_id)
+                except CapError:
+                    pass
         _remember(chat)
         agenda = _ledger(chat, "agenda")
         now = _when("" if agenda is None else agenda.get("agenda_now", "")) or _agenda_now()
-        world = _latest_slots(chat)
+        world = _latest_slots(chat) or _world_now(procedure, _STALE_TTL)
     mine = {agent, _ROLE_NAMES.get(role_of(), "")} - {""}
     slots: list[dict[str, str]] = []
     if now is not None and world is not None:
