@@ -156,6 +156,7 @@ $PY -I tests/h_rebook.py hospital/agent hospital  # L6 facility side: cancel + a
 $PY -I tests/bc_ring.py booking_centre/agent tests/bc_test.py    # rare language partner, round 2, no empty promise
 $PY -I tests/h_l7.py hospital/agent hospital      # L7: duplicate request -> same offers, duplicate confirm -> same receipt
 $PY -I tests/impostor.py hospital/agent hospital  # Sat 10:00: agents outside the ring get no slots, holds or citizens
+$PY -I tests/gp_l8.py gp/agent                 # L8: hidden red flags escalated, negated/harmless ones not
 ```
 
 All must pass before any deploy.

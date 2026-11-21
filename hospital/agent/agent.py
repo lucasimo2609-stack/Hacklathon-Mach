@@ -1340,6 +1340,21 @@ _RED_FLAG_PATTERNS: tuple[re.Pattern[str], ...] = (
         r"|\b(loss of|losing|lost|no) (strength|feeling|power)[^.;!?]{0,15}\blegs?"
         r"|\blegs?\b[^.;!?]{0,20}\b(weak\w*|giving (way|out)|numb|gave (way|out)|won.?t move|collaps\w*)"
         r"|\bcan.?t (feel|move) my legs"
+        # Level 8: the flag hidden in plain words (live phrasings the old net missed)
+        r"|\b(cedono|ceduto|cedevano|tremano|tremavano)\b[^.;!?]{0,15}\b(le |mie )?gamb"
+        r"|\bgamb\w*[^.;!?]{0,20}\bnon (mi |le |ci )?(regg\w*|tengono|tenevano|sostengono)"
+        r"|\bnon (le |li )?sento (piu )?(bene |piu bene |quasi )?(le |i )?(gambe|piedi)"
+        r"|\bdebolezza\b[^.;!?]{0,20}\b(gamb|arti inferiori)"
+        r"|\bnon riesco (piu )?a (stare in piedi|reggermi in piedi)"
+        r"|\btrascin\w* (la |una )?gamba|\bmi si piegano le gambe"
+        r"|\bcan.?t (feel|move) (my )?(feet|legs)|\bcan.?t stand( up)?\b|\blegs? (buckl\w*|fold\w*)"
+    ),
+    re.compile(
+        # Level 8 chest: pressure / crushing / tightness before the word, radiating pain
+        r"\b(crush\w*|tight\w*|pressure|heavy|heaviness|weight|squeez\w*|burning)\b[^.;!?]{0,25}\bchest\b"
+        r"|\b(sento|ho|avverto) (una |come una )?(oppression\w*|morsa|stretta)\b"
+        r"|\bdolor\w*[^.;!?]{0,30}\b(braccio sinistro|mascella|spalla sinistra)"
+        r"|\bpain\b[^.;!?]{0,30}\b(left arm|jaw)"
     ),
 )
 # A red flag the citizen says they do NOT have: "nessun dolore al petto, solo palpitazioni".
