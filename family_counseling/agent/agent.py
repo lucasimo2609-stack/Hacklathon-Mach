@@ -1063,6 +1063,17 @@ async def _never_silent(role: str, city: City, message: Message, chat: list[Mess
     elif role in ("booking_centre", "family_counseling"):
         offer = _our_offer(fresh, agent, fields.get("offer_id", ""))
         if "confirm" in kind and offer:
+            # The booking is under way and the receipt comes as its own message. A "registering,
+            # the receipt follows" line before it spends the citizen's turn and pushes the
+            # receipt (and the 5-minute check-in window) one turn later. Say it only when the
+            # citizen repeats a confirm we have not answered yet.
+            token = f"offer_id={fields.get('offer_id', '')}"
+            earlier = [row for row in fresh if row.sender == message.sender
+                       and row.msg_id != message.msg_id and "confirm" in words(row.text)
+                       and token in row.text.split()]
+            if not earlier:
+                _LOG.info("care.confirm.quiet role=%s", role)
+                return
             line = _quiet_line("booking_wait", lang)
         elif role == "booking_centre" and not _number(fresh):
             if _we(fresh, agent, "fields=prescription_number", to=message.sender, word="data.request"):
@@ -3788,8 +3799,11 @@ async def _slow_ledger(
     A Ledger answer does not always open a turn of its own: ending here silent stalled the
     case until the citizen gave up ("no booking although acceptable slots were free")."""
 
-    if citizen and _once(f"slow:{key}") and not _answered(chat, city.agent_id, message):
-        await _say(city, citizen, _quiet_line("ledger_slow_wait", _lang(chat)))
+    # No holding line up front (21 Nov 15:30). Every message to a citizen spends one of their
+    # turns, and "the citizen chooses in that same turn; a later message does not enter a choice
+    # already made" (kit rules): journey ...477 answered our holding line in 2 min, then read
+    # the real answer only 14 min later. The citizen now gets ONE message with the offers; if
+    # the Ledger stays silent, _never_silent still sends one line at the end of the turn.
     start = time.monotonic()
     deadline = start + _SLOW_WAIT
     reasked = 0

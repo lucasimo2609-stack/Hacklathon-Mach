@@ -28,7 +28,7 @@ async def main():
     await turn(c, CIT, "vorrei prenotare prescription_number=rx-1 lang=it")
     sent = [x for to, x in c.out if to == CIT]
     joined = " ".join(sent)
-    check("one holding line", joined.count("registro regionale") == 1, joined)
+    check("no holding line before the answer (one message, one citizen turn)", joined.count("registro regionale") == 0, joined)
     check("then the waiting list (relaxed alternative), never silence", f"offer_id={A._SLOW_WL}" in joined and "waiting_list=true" in joined, joined)
     check("no claim of 'no slot in our ASST' before the Ledger answered", "cross_asst" not in joined, joined)
     # The Ledger finally answers: its slot list arrives as a turn of its own

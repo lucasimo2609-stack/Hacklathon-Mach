@@ -25,7 +25,7 @@ async def main():
     t = time.monotonic(); await turn(c, CIT, "vorrei prenotare prescription_number=rx-1 lang=it"); took = time.monotonic() - t
     sent = " ".join(x for to, x in c.out if to == CIT)
     check("lost slot list: booking asks again and offers in the same turn", "offer offer_id=of-S" in sent, sent)
-    check("one holding line only", sent.count("registro regionale") == 1, sent)
+    check("no holding line: the offers are the first message (one citizen turn)", sent.count("registro regionale") == 0 and "offer offer_id=" in sent, sent)
     check(f"turn bounded (took {took:.0f}s < 130s)", took < 130, f"{took:.0f}s")
     print("failures:", bad)
 asyncio.run(main())
