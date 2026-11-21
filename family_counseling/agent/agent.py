@@ -1750,9 +1750,10 @@ async def _refresh_gp_world(city: City, procedure: str) -> None:
     if last is not None and time.monotonic() - last < _GP_WORLD_EVERY:
         return
     _GP_WORLD_ASKED[procedure] = time.monotonic()
-    await _say(city, LEDGER, f"world procedure={procedure} page=1")
+    calls = [_say(city, LEDGER, f"world procedure={procedure} page=1")]
     if _agenda_now() is None:
-        await _say(city, LEDGER, "agenda")
+        calls.append(_say(city, LEDGER, "agenda"))
+    await asyncio.gather(*calls)
 
 
 def _cached_first_slot(procedure: str, priority: str, said: str) -> str:
@@ -1897,11 +1898,17 @@ async def _gp(city: City, message: Message, chat: list[Message]) -> None:
     )
     # Collaboration: tell the booking centre, unasked (language, shareable needs; no citizen
     # id, no symptom).
-    await _notify_booking(city, chat, number, procedure, priority, said, needs)
-    # Keep the slot copy warm for the next citizens and read the protocol table once: both are
-    # sent without waiting; the Ledger's answers open their own (instant) turns, see _gp_echo.
-    await _refresh_gp_world(city, procedure)
-    await _read_protocols(city, message.need_id, chat)
+    # Speed (21 Nov 14:40, city-wide queue): the three follow-ups do not depend on each other,
+    # so they go out together instead of one platform round-trip after the other. The
+    # citizen's prescription above is already sent; a failure in one never stops the others.
+    await asyncio.gather(
+        _notify_booking(city, chat, number, procedure, priority, said, needs),
+        # Keep the slot copy warm for the next citizens and read the protocol table once: the
+        # Ledger's answers open their own (instant) turns, see _gp_echo.
+        _refresh_gp_world(city, procedure),
+        _read_protocols(city, message.need_id, chat),
+        return_exceptions=True,
+    )
 
 
 async def _notify_booking(
