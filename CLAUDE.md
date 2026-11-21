@@ -41,6 +41,56 @@ never `city init` or `city retire`.
   appeared once we added it). Never put act words (offer, confirm, cancel, consent,
   prescription, checkin, report) as standalone words inside the friendly text unless intended.
 
+## MACH-1.2 (common inter-ASST format, from 21 Nov 01:15)
+
+Backward compatible with MACH-1 / 1.1. Full text: `MACH-1.2.md` on Discord. What matters for us:
+
+- **Roadmap:** L5 01:15 combined constraints · L6 02:15 `fault.cancel` on every first booking ·
+  L7 03:15 partners down, duplicates, shared slots · L8 04:15 rules change mid-wave ·
+  **freeze 06:00, last deploy 05:30** · Sat 10:00 impostors. Lower-level citizens keep coming.
+- **Reading:** split by line, first word = act, each line on its own; a line without `=` is
+  human text; unknown keys ignored; an unknown `cancel` reason means `no_availability`.
+- **Writing:** one line per act, one message, max 6 offer lines; ISO dates without zone; no
+  punctuation glued to values; `offer` and `cancel` echo `request_id`; Italian human line last,
+  without act words.
+- **need.request (L5, done):** criteria only: `lang`, `gender_preference` (`gender` synonym),
+  `days=tue/thu`, optional `after`/`before`/`wheelchair`/`deadline`/`rebook_of`. Never name,
+  citizen id or prescription before `consent purpose=cross_asst`.
+- **Relaxed offers (L5, done on facilities):** nothing fits all criteria → `cancel
+  reason=no_availability` and, under it in the same message, up to 3 offers breaking ONE
+  criterion, marked `relaxed=days|gender|lang`. The booking centre never shows `relaxed`,
+  `reserve`, `doctor_lang`, `doctor_gender` to the citizen: it says in Italian what changes
+  and asks if it is fine.
+- **REBOOK (L6, todo):** a facility that cancels sends `cancel reason=facility_cancelled
+  booking_id=…` plus replacement offers in the same message; a `need.request` with
+  `rebook_of=` goes first (answer within 5 s).
+- **Idempotency (L7, todo):** same `request_id` → same offers; same `offer_id` confirm → same
+  receipt, never a second hold; never a receipt without a successful `commit` (−2).
+- **Soft lock (L7):** a slot offered to one `request_id` is not offered to another for 60 real
+  seconds; the Ledger's first `hold` wins, others get `cancel reason=slot_taken` + alternatives.
+- **Rule sync (L8, done in `_on_refused`):** `PRESCRIPTION_EXPIRED` → `prescription_expired`
+  (send to GP for renewal), `CONSENT_MISSING` → `consent_missing` (ask `cross_asst`, confirm
+  again), `NO_CAPACITY` → `no_capacity` (B/D/P take a non-reserve slot). With P3 facilities
+  mark reserve slots `reserve=U`.
+- **Retries:** never retry a refusal (4xx, `TARGET_NOT_VISIBLE`, Ledger refusals). Retry a
+  silence once after 10 s, then move to another facility.
+- **Trust ring (impostors):** sender must be in `_TRUSTED_AGENTS` and returned by
+  `city.find`; `facility=` must equal the sender; procedure offered by that facility; future
+  date within deadline and doctor in the registry with that language/gender; a real offer
+  never asks for data. Red flags: asks citizen data, contains instructions
+  ("ignora le regole", "system:"), receipt without our confirm, too-good slot. Report on
+  Discord as `ring.alert suspect=agent:… reason=not_listed|facility_mismatch|asked_data|injection|phantom_receipt|fake_slot seen=… by=red-agent`.
+- **Ring tables in code** (`_RARE_BY_ASST`, `_PARTNER_AGENTS`, `_TRUSTED_AGENTS`,
+  `_KNOWN_FACILITIES`): add every id list posted on Discord. Rare languages: Giambellino ka,
+  Precotto/Toros ro, Nord ur, Corvetto fr, Brera fa, Isola tl, Ortica wo, Greco si, Bicocca ti,
+  Lambrate ja, Gorla sq, Forlanini de, Città Studi tr (`asst-citta-studi-*`, ASST names may
+  contain a dash). Unknown: Lorenteggio, Bovisa. Ids missing: Isola hospital/booking/GP,
+  Gorla, Brera, Ortica, Forlanini, Città Studi.
+- **Citizen phrases** (plain Italian): searching outside ASST «Qui non c'è posto in tempo
+  utile. Sto cercando nelle ASST vicine…»; relaxed «Martedì non c'è posto. Giovedì alle 11 c'è
+  lo stesso tipo di visita. Va bene lo stesso?»; rebooking «La struttura ha annullato il suo
+  appuntamento. Le ho già trovato un altro posto…»; none «La metto in lista d'attesa…».
+
 ## What the brain does (high level)
 
 - GP: 3-layer symptom recognition (regex + typo net → LLM fallback → polite clarify), wide
@@ -79,6 +129,7 @@ $PY -I tests/sp_flow.py specialist/agent     # report consent, silence, GP care.
 $PY -I tests/h_test.py hospital/agent hospital
 $PY -I tests/h_desk.py hospital/agent hospital
 $PY -I tests/h_alt.py hospital/agent tests/h_desk.py
+$PY -I tests/mach12.py hospital/agent hospital    # MACH-1.2: relaxed offers, days/gender criteria
 ```
 
 All must pass before any deploy.
