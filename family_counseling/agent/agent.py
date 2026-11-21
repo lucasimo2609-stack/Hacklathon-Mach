@@ -3354,7 +3354,8 @@ def _own_facility_slots(chat: list[Message], agent: str, procedure: str) -> str 
 
 
 _PREFETCH = ("VIS-FIS", "VIS-CARD")
-_SLOW_WAIT = 45.0  # a slow Ledger: keep the turn alive this long before giving the citizen up
+_SLOW_WAIT = 120.0  # a slow Ledger: 45 s was not enough on 21 Nov (holding lines left 8-10 min)
+_SLOW_REASK = 60.0  # half-way: ask the Ledger again, its first answer may be lost
 _SLOW_POLL = 1.0
 
 
@@ -3373,7 +3374,9 @@ async def _slow_ledger(
 
     if citizen and _once(f"slow:{key}") and not _answered(chat, city.agent_id, message):
         await _say(city, citizen, _quiet_line("ledger_slow_wait", _lang(chat)))
-    deadline = time.monotonic() + _SLOW_WAIT
+    start = time.monotonic()
+    deadline = start + _SLOW_WAIT
+    reasked = 0
     rows = chat
     while time.monotonic() < deadline:
         await asyncio.sleep(_SLOW_POLL)
@@ -3383,6 +3386,15 @@ async def _slow_ledger(
             continue
         if ready(rows):
             return rows
+        if time.monotonic() - start >= _SLOW_REASK + 30.0 * reasked:
+            # Ask again (at 60 s, then every 30 s) what we are still missing: an overloaded
+            # Ledger drops requests, and a lost answer would stall the case.
+            reasked += 1
+            agent = city.agent_id
+            asked = [row.text for row in rows if row.sender == agent and row.recipient == LEDGER
+                     and first_word(row.text) in {"world", "prescription", "agenda"}]
+            for text in dict.fromkeys(asked):
+                await _say(city, LEDGER, text)
     return rows
 
 
@@ -4716,9 +4728,12 @@ def _latest_now(case_now: datetime | None) -> datetime | None:
         return case_now
 
 
-def _world_now(procedure: str) -> str | None:
+_OWN_TTL = 600.0  # our own booking centre (Ledger slow): a 10-min-old slot copy beats no offer
+
+
+def _world_now(procedure: str, ttl: float | None = None) -> str | None:
     hit = _WORLD_SEEN.get(procedure)
-    if hit is None or time.monotonic() - hit[0] > _WORLD_TTL:
+    if hit is None or time.monotonic() - hit[0] > (_WORLD_TTL if ttl is None else ttl):
         return None
     return hit[1]
 
@@ -4784,7 +4799,8 @@ async def _partner_request(
             return  # already answered this request
     _remember(chat)
     now = _agenda_now()
-    world = _world_now(procedure)
+    own = "source=own_asst" in (message.text or "")
+    world = _world_now(procedure, _OWN_TTL if own else _WORLD_TTL)
     if now is None or world is None:
         # No fresh copy: acknowledge right away, then read the Ledger.
         tail = f" request_id={request_id}" if request_id else ""

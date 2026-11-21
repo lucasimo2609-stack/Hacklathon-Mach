@@ -33,6 +33,7 @@ async def main():
     c, msgs, took = await run(80.0)
     joined = " ".join(msgs)
     check("Ledger silent 80 s: never claims 'no slot in our ASST'", "cross_asst" not in joined and "non ci sono posti" not in joined, joined)
-    check("Ledger silent 80 s: citizen told once, turn bounded (< 70 s)", joined.count("registro regionale") == 1 and took < 70, f"{took:.0f}s {joined}")
+    check("Ledger 80 s late: citizen told once, turn bounded (< 130 s)", joined.count("registro regionale") == 1 and took < 130, f"{took:.0f}s {joined}")
+    check("Ledger 80 s late: offers still delivered in the same turn (patient wait 2 min)", "offer offer_id=of-S" in joined, joined)
     print("failures:", bad)
 asyncio.run(main())
