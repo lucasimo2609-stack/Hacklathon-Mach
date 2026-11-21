@@ -1746,6 +1746,10 @@ async def _gp_for_agent(city: City, message: Message, chat: list[Message]) -> No
     Never shares anything beyond the prescription's own protocol fields."""
 
     agent = city.agent_id
+    if _STRICT_PARTNERS and not _ring_member(message.sender):
+        # Impostor guard: no prescription details for an agent outside the ring (asked_data).
+        _LOG.warning("ring.alert suspect=%s reason=asked_data text=%s", message.sender, message.text[:200])
+        return
     number = fields_of(message.text).get("prescription_number", "") or _number_in_words(message.text) or ""
     if not number:
         if any(row.sender == agent and row.recipient == message.sender for row in chat):
@@ -3421,7 +3425,7 @@ async def _go_partner(
         + f"request_id={need_id or 'case'} Richiesta di disponibilità da un'ASST partner."
     )
     results = await asyncio.gather(
-        *(_say(city, agent_id, text) for agent_id in unique[:_MAX_PARTNERS]),
+        *(_say(city, agent_id, text) for agent_id in [a for a in unique if not _STRICT_PARTNERS or _ring_member(a)][:_MAX_PARTNERS]),
         return_exceptions=True,
     )
     asked = sum(1 for ok in results if ok is True)
@@ -3432,6 +3436,27 @@ async def _go_partner(
 
 
 _REAL_AGENT_ID = re.compile(r"^agent:[a-z0-9]{12}$")
+
+
+def _cancel_from_owner(chat: list[Message], agent: str, sender: str, offer_id: str) -> bool:
+    """The cancel's sender is the facility behind that offer: ours, or the partner whose offer
+    we passed on / confirmed with. A cancel naming none of our offers is harmless either way."""
+
+    if sender in _TEAM or not _REAL_AGENT_ID.match(sender):
+        return True
+    if not _ring_member(sender):
+        return False
+    if not offer_id:
+        return True
+    held = _our_offer(chat, agent, offer_id)
+    if not held:
+        return True
+    owners = {held.get("via", ""), held.get("facility", "")}
+    owners |= {
+        row.recipient for row in chat
+        if row.sender == agent and first_word(row.text) == "confirm" and f"offer_id={offer_id}" in row.text.split()
+    }
+    return sender in owners
 
 
 def _ring_member(agent_id: str) -> bool:
@@ -3577,7 +3602,8 @@ async def _ask_again(city: City, chat: list[Message], procedure: str, priority: 
         + f"request_id={need_id or 'case'}-r2 Seconda richiesta: il cittadino aspetta ancora un posto."
     )
     results = await asyncio.gather(
-        *(_say(city, agent_id, text) for agent_id in targets[:_MAX_PARTNERS]), return_exceptions=True
+        *(_say(city, agent_id, text) for agent_id in [a for a in targets if not _STRICT_PARTNERS or _ring_member(a)][:_MAX_PARTNERS]),
+        return_exceptions=True
     )
     return sum(1 for ok in results if ok is True)
 
@@ -4215,6 +4241,11 @@ async def _partner_cancel(
     citizen = _citizen(chat)
     if not offer_id and fields.get("booking_id"):
         offer_id = _offer_of_booking(chat, city.agent_id, fields["booking_id"])
+    if _STRICT_PARTNERS and not _cancel_from_owner(chat, city.agent_id, message.sender, offer_id):
+        # Impostor guard: a cancel for an offer that is not this sender's would tear down a
+        # good booking (offer ids are guessable). Only the facility behind the offer may.
+        _LOG.warning("ring.alert suspect=%s reason=facility_mismatch text=%s", message.sender, message.text[:200])
+        return
     if (
         citizen
         and offer_id
