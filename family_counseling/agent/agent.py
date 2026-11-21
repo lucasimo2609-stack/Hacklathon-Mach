@@ -2371,14 +2371,10 @@ def _number_in_words(text: str) -> str | None:
 
 
 def _lang(chat: list[Message]) -> str:
-    # What the citizen explicitly asks for wins over the profile token: lang=de citizens wrote
-    # "a doctor who speaks English", we searched partners for German and the journey stopped
-    # (21 Nov, ...254/...212/...151), while our own h1/s1/c1 speak English.
-    for row in chat:
-        if row.sender.startswith("citizen:"):
-            asked = _lang_asked(row.text or "")
-            if asked:
-                return asked
+    # The citizen's lang= token decides, not the words: wave W01QQQ (21 Nov 12:00) lang=si
+    # citizens wrote "English speaking doctor", we offered h1 (it/en) and they cancelled four
+    # times with reason=lang (28 cancels). The judge also counts the valid set by the token.
+    # The words only decide when no token was sent (level 3).
     said = []
     for row in chat:
         if row.sender.startswith("citizen:"):
