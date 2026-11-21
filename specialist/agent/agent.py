@@ -4290,6 +4290,22 @@ async def _on_confirm(
         return
     if not slot or not consent:
         return
+    if from_citizen and offer_id:
+        # MACH R21 for citizens: the same confirm gets the same receipt. A citizen repeating a
+        # confirm we already booked was told "la ricevuta arriva tra pochi secondi" again.
+        # Only the SAME offer_id counts: confirming a new alternative after a cancel books it.
+        token = f"offer_id={offer_id}"
+        earlier = next((i for i, row in enumerate(chat)
+                        if row.sender == message.sender and row.msg_id != message.msg_id
+                        and "confirm" in words(row.text) and token in row.text.split()), None)
+        if earlier is not None:
+            receipts = [row for row in chat[earlier:]
+                        if row.sender == agent and row.recipient == message.sender
+                        and first_word(row.text) == "booking.receipt"]
+            if receipts:
+                if _once(f"dup-citizen-confirm:{message.msg_id}"):
+                    await _say(city, message.sender, receipts[-1].text)
+                return
     citizen = fields.get("citizen") or (
         message.sender if message.sender.startswith("citizen:") else ""
     )
@@ -4350,9 +4366,16 @@ async def _on_confirm(
             parts.append(f"consent_ref={cross_ref or consent}")
             if cross_ref:
                 parts.append(f"cross_asst_consent_ref={cross_ref}")
-            if not await _say(city, LEDGER, " ".join(parts)):
-                return
-            _HELD[slot] = time.monotonic()
+            text = " ".join(parts)
+            # Two identical confirms in the same second (21 Nov ...360007) both reached here
+            # before either hold was in the case: two holds on one slot, the second refused
+            # SLOT_TAKEN on its own turn. One hold per exact command; the duplicate turn waits
+            # for the same held line (commit and receipt are guarded too). A re-confirm with a
+            # new consent is a different command and still holds.
+            if _once(f"hold-sent:{message.need_id}:{text}"):
+                if not await _say(city, LEDGER, text):
+                    return
+                _HELD[slot] = time.monotonic()
         await _finish_booking(city, message, chat, slot, hold_self=hold_self)
         return
     if not facility or not citizen:
