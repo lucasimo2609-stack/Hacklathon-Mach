@@ -730,6 +730,16 @@ _QUIET = {
         "fr": "Je vérifie auprès du registre régional, lent en ce moment : je vous envoie les "
         "horaires dès sa réponse. Sans nouvelles dans une minute, réécrivez-moi.",
     },
+    "ledger_slow_wait": {
+        "it": "Il registro regionale è lento in questo momento: sto aspettando gli orari e glieli "
+        "mando appena arrivano, non deve fare nulla.",
+        "en": "The regional register is slow right now: I am waiting for the times and will send "
+        "them as soon as they arrive, you do not need to do anything.",
+        "es": "El registro regional va lento ahora mismo: espero los horarios y se los envío en "
+        "cuanto lleguen, no tiene que hacer nada.",
+        "fr": "Le registre régional est lent en ce moment : j'attends les horaires et je vous les "
+        "envoie dès qu'ils arrivent, vous n'avez rien à faire.",
+    },
     "gp_wait": {
         "it": "Sto verificando la sua ricetta sul registro regionale: le rispondo appena possibile. "
         "Se intanto mi dice cosa sente, preparo tutto io.",
@@ -2852,7 +2862,7 @@ async def _advance_alone(
     now = _when("" if agenda is None else agenda.get("agenda_now", ""))
     world = _latest_slots(chat)
     # Ask, then read the reply from history: the push of a ledger message does not open a turn.
-    for _pass in range(3):
+    for _pass in range(4):
         # The Ledger line for the CURRENT number: after a renewal the citizen brings a new one.
         reply = _rx_line(chat, _number(chat))
         priority = None if reply is None else reply.get("priority")
@@ -2870,7 +2880,16 @@ async def _advance_alone(
         number = _number(chat)
         if fixed is None and number and not procedure:
             if _pass == 2:
-                return
+                # Slow Ledger: the prescription is not back yet. Do not end the turn silent
+                # (its late answer may never open a turn: 20 journeys stalled on 21 Nov).
+                current = number
+                chat = await _slow_ledger(
+                    city, message, chat, citizen, key,
+                    lambda rows: _rx_line(rows, current) is not None,
+                )
+                if _rx_line(chat, current) is None:
+                    return
+                continue
             if not any(
                 row.sender == agent
                 and row.recipient == LEDGER
@@ -2921,6 +2940,16 @@ async def _advance_alone(
         if now is not None and world is not None:
             break
         if _pass == 2:
+            wanted = procedure
+            chat = await _slow_ledger(
+                city, message, chat, citizen, key,
+                lambda rows: (_has_agenda(rows) or _agenda_now() is not None)
+                and _slots_for(rows, agent, wanted) is not None,
+            )
+            now = _case_now(chat, agent)
+            world = _slots_for(chat, agent, procedure)
+            if now is not None and world is not None:
+                break
             return
         if now is None and not _exact(chat, agent, "agenda"):
             await _say(city, LEDGER, "agenda")
@@ -2938,7 +2967,13 @@ async def _advance_alone(
         )
     else:
         # Our world has no slot list for this procedure at all: the answer is in a partner.
-        if procedure and fixed is None and _asked(chat, agent, procedure, 1) and _slots_for(chat, agent, procedure) is None:
+        if (
+            procedure
+            and fixed is None
+            and _asked(chat, agent, procedure, 1)
+            and _slots_for(chat, agent, procedure) is None
+            and any(_is_world_reply(row) for row in chat)
+        ):
             await _flush_rebook(city, key, citizen, chat)
             await _go_partner(
                 city, chat, citizen, procedure, priority, number, {agent}, message.need_id
@@ -3177,6 +3212,36 @@ def _pending_booking_consent(chat: list[Message], agent: str, message: Message) 
 
 
 _PREFETCH = ("VIS-FIS", "VIS-CARD")
+_SLOW_WAIT = 45.0  # a slow Ledger: keep the turn alive this long before giving the citizen up
+_SLOW_POLL = 1.0
+
+
+async def _slow_ledger(
+    city: City,
+    message: Message,
+    chat: list[Message],
+    citizen: str,
+    key: str,
+    ready: Callable[[list[Message]], bool],
+) -> list[Message]:
+    """The Ledger is slower than the short waits. Tell the citizen once (they are not left
+    silent), then keep reading the case until the answer is there or _SLOW_WAIT runs out.
+    A Ledger answer does not always open a turn of its own: ending here silent stalled the
+    case until the citizen gave up ("no booking although acceptable slots were free")."""
+
+    if citizen and _once(f"slow:{key}") and not _answered(chat, city.agent_id, message):
+        await _say(city, citizen, _quiet_line("ledger_slow_wait", _lang(chat)))
+    deadline = time.monotonic() + _SLOW_WAIT
+    rows = chat
+    while time.monotonic() < deadline:
+        await asyncio.sleep(_SLOW_POLL)
+        try:
+            rows = await city.history(need_id=message.need_id)
+        except CapError:
+            continue
+        if ready(rows):
+            return rows
+    return rows
 
 
 def _world_asks(chat: list[Message], agent: str, procedure: str) -> int:
