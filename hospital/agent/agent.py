@@ -3454,7 +3454,9 @@ def _fits_partner(
     # agenda line once let a partner slot 9 days away through for a priority-B citizen.
     now = _case_now(chat, agent)
     at = _when(offer.get("agenda_date") or offer.get("at") or "")
-    if now is None or at is None:
+    if at is None:
+        return False  # fail closed: a partner slot without a readable date never reaches a citizen
+    if now is None:
         return True
     if at <= now + _LEAD:
         return False
@@ -3616,14 +3618,19 @@ _YES = re.compile(r"\b(si|sì|ok|okay|va bene|certo|d'accordo|daccordo|accetto|a
 _NO = re.compile(r"\b(no|non|preferisco di no|rifiuto|nego|not|don't|dont|never|mai|nope)\b")
 
 
-def _consent_answer(row: Message) -> str:
+def _consent_answer(row: Message, purpose: str = "") -> str:
     """yes / no / unclear for a citizen's answer to a consent question. A refusal comes in
-    plain words; a yes may come as consent consent_ref=…, data.response, or plain words."""
+    plain words; a yes may come as consent consent_ref=…, data.response, or plain words.
+    A consent that names ANOTHER purpose (booking instead of cross_asst, …) never counts as
+    a yes to this question: no data crosses ASSTs on the wrong consent (P2, -2)."""
 
     fields = fields_of(row.text)
     kind = words(row.text)
     if fields.get("offer_id") or "confirm" in kind:
         return ""
+    said = fields.get("purpose", "")
+    if purpose and said and said != purpose:
+        return "unclear"
     if fields.get("consent_ref"):
         return "yes"
     folded = _fold(row.text)
@@ -3745,7 +3752,7 @@ async def _cross_turn(city: City, message: Message, chat: list[Message], citizen
     refused = False
     unclear = False
     for row in after:
-        verdict = _consent_answer(row)
+        verdict = _consent_answer(row, "cross_asst")
         fields = fields_of(row.text)
         if verdict == "yes":
             consent = fields.get("consent_ref") or fields.get("provided_ref") or f"cons-{message.need_id}-cross_asst"
@@ -5290,7 +5297,7 @@ async def _on_report_consent(city: City, message: Message, chat: list[Message]) 
     token = f"booking_id={booking_id}"
     if _we(chat, agent, token, to=LEDGER, word="report"):
         return
-    answer = _consent_answer(message)
+    answer = _consent_answer(message, "report_sharing")
     if answer == "unclear":
         asks = sum(1 for row in chat if row.sender == agent and row.recipient == citizen
                    and "purpose=report_sharing" in row.text.split())
