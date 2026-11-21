@@ -3188,6 +3188,13 @@ async def _advance_alone(
             world = _slots_for(chat, agent, procedure)
             if now is not None and world is not None:
                 break
+            # 21 Nov 12:00-13:00: ~15 journeys got the holding line and then nothing (the
+            # Ledger never answered in time) -> -1 no_alternative with an empty answer set.
+            # The waiting list is the relaxed alternative (0); it is marked "slow" so the
+            # real times are still offered when the Ledger's slots arrive later (upgrade).
+            if citizen and not _offered(chat, agent):
+                await _waiting_list(city, chat, citizen, message.need_id,
+                                    offer_id=f"{_SLOW_WL}{message.need_id or 'case'}")
             return
         if now is None and not _exact(chat, agent, "agenda"):
             await _say(city, LEDGER, "agenda")
@@ -3327,6 +3334,7 @@ async def _advance_alone(
         still_open = any(o["slot_id"] not in _declined(latest, agent) for o in fresh_batch)
         if (_offered(latest, agent) and (still_open or not fresh_batch)) or any(
             row.sender == agent and row.recipient == citizen and "waiting_list=true" in row.text
+            and f"offer_id={_SLOW_WL}" not in row.text  # a slow-register waiting list upgrades
             for row in latest
         ):
             return
@@ -3552,6 +3560,7 @@ def _own_facility_slots(chat: list[Message], agent: str, procedure: str) -> str 
 
 _PREFETCH = ("VIS-FIS", "VIS-CARD")
 _SLOW_WAIT = 120.0  # a slow Ledger: 45 s was not enough on 21 Nov (holding lines left 8-10 min)
+_SLOW_WL = "wl-slow-"  # waiting list sent when the Ledger never answered: real slots still upgrade it
 _SLOW_REASK = 60.0  # half-way: ask the Ledger again, its first answer may be lost
 _SLOW_POLL = 1.0
 
