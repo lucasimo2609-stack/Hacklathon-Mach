@@ -28,7 +28,8 @@ def offered(c):
     return " ".join(t for to, t in c.out if to == CIT)
 async def main():
     # Born Tue 08:00, now Wed 06:00 (22 agenda hours of slow city). B = 48 h from birth.
-    slots = [line(1, "2026-11-04T10:30"), line(2, "2026-11-04T16:00"), line(3, "2026-11-05T10:30"), line(4, "2026-11-06T10:30")]
+    # 21 Nov: B needs 8 h of lead (now Wed 06:00): the early Wednesday slot is 14:30.
+    slots = [line(1, "2026-11-04T14:30"), line(2, "2026-11-04T16:00"), line(3, "2026-11-05T10:30"), line(4, "2026-11-06T10:30")]
     c = fresh("2026-11-03T08:00", "2026-11-04T06:00", slots)
     await turn(c, CIT, "vorrei prenotare prescription_number=rx-1 lang=it")
     got = offered(c)

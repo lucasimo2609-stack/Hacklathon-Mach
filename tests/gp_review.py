@@ -58,6 +58,8 @@ def reset():
     A._WORLD_SEEN.clear(); A._GP_WORLD_ASKED.clear(); A._AGENDA_SEEN = None
 
 async def main():
+    # 21 Nov: B needs 8 h of lead (clock Monday 08:00): Monday 12:00 is too soon, the earliest
+    # suitable slot is h1 on Tuesday 09:00 (h2 is Italian-only and never works Mondays).
     reset()
     # 1. Cold copy: prescription at once, no slot line; the slot query goes out AFTER the reply
     c = G(); rx, took = await gp(c, "Buongiorno dottore, ho mal di schiena da settimane")
@@ -80,10 +82,10 @@ async def main():
     # 3. Next citizens: earliest suitable slot named in the SAME message, no new query
     c = G(); rx, took = await gp(c, "I'm writing for my mother, her back hurts a lot. She only speaks English.")
     check("English + caregiver acknowledged", "I am sorry about your back pain, for the person you care for" in rx, rx)
-    check("English-speaking doctor chosen (h1, not h2), in the prescription message", "the first time that suits you is Monday 16 November at 12:00" in rx, rx)
+    check("English-speaking doctor chosen (h1, not h2), in the prescription message", "the first time that suits you is Tuesday 17 November at 09:00" in rx, rx)
     check("throttle: no new slot query within 2 min", not any(r.recipient == LEDGER and r.text.startswith("world procedure=") for r in c.rows))
     c = G(); rx, _ = await gp(c, "Buongiorno, ho mal di schiena da giorni")
-    check("Italian: h2 skipped (no Mondays), h1 named", "il primo posto adatto a lei è lunedì 16 novembre ore 12:00" in rx, rx)
+    check("Italian: h2 skipped (no Mondays), h1 named", "il primo posto adatto a lei è martedì 17 novembre ore 09:00" in rx, rx)
     c = G(); rx, _ = await gp(c, "Back pain. Too busy, quick.")
     check("curt: brief line + first time only", "Book at the booking centre with this number." in rx and "first time" in rx and "sorry" not in rx, rx)
 
