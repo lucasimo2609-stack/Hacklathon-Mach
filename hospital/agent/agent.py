@@ -3336,7 +3336,7 @@ def _fits_partner(
     return True
 
 
-_MAX_PARTNERS = 30
+_MAX_PARTNERS = 12  # per round: 25 answers per case flooded our mailbox (level 6: time matters)
 
 
 async def _go_partner(
@@ -3380,12 +3380,18 @@ async def _go_partner(
     seen_ids: set[str] = set()
     unique = []
     lang = _lang(chat)
+    # The partner that speaks the citizen's rare language first, then what the Index returned,
+    # then the rest of the ring: at most _MAX_PARTNERS per round.
     known_first = [
         by_service[service]
-        for code, by_service in sorted(_PARTNER_AGENTS.items(), key=lambda item: item[0] != lang)
-        if service in by_service and by_service[service] not in own
+        for code, by_service in _PARTNER_AGENTS.items()
+        if code == lang and service in by_service and by_service[service] not in own
     ]
     known_rest = [
+        by_service[service]
+        for code, by_service in _PARTNER_AGENTS.items()
+        if code != lang and service in by_service and by_service[service] not in own
+    ] + [
         agent_id for agent_id, svc in _KNOWN_FACILITIES.items() if svc == service and agent_id not in own
     ]
     for agent_id in known_first + [peer.agent_id for peer in partners] + known_rest:
@@ -3526,9 +3532,15 @@ async def _ask_again(city: City, chat: list[Message], procedure: str, priority: 
         peer.agent_id for peer in peers
         if peer.role != "booking_centre" and any(cap == service or cap.startswith(family) for cap in peer.capabilities)
     ]
+    asked = {row.recipient for row in chat if row.sender == agent and first_word(row.text) == "need.request"}
+    said_none = {
+        row.sender for row in chat
+        if row.sender in asked and first_word(row.text) == "cancel" and not _offers_in(row.text)
+        and fields_of(row.text).get("reason", "no_availability") == "no_availability"
+    }
     targets: list[str] = []
-    for agent_id in first + found + rest:
-        if agent_id and agent_id not in own and agent_id not in targets:
+    for agent_id in first + [a for a in found + rest if a not in asked] + [a for a in found + rest if a in asked]:
+        if agent_id and agent_id not in own and agent_id not in targets and agent_id not in said_none:
             targets.append(agent_id)
     text = (
         f"need.request service_type={service} procedure={procedure} priority={priority or 'D'} "

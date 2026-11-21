@@ -29,7 +29,7 @@ async def main():
     await say(c, CIT, "my back hurts, I need a doctor who speaks my language prescription_number=rx-1 lang=de")
     asked = [to for to, t in c.out if t.startswith("need.request")]
     check("Forlanini's hospital asked first", asked and asked[0] == FORL, str(asked[:3]))
-    check("every ring hospital asked", len(set(asked)) >= 20, str(len(set(asked))))
+    check("12 hospitals asked per round", len(set(asked)) == 12, str(len(set(asked))))
     async def late():
         await asyncio.sleep(2.0); c.add(FORL, BC, poff("F1", FORL))
     task = asyncio.create_task(late())
