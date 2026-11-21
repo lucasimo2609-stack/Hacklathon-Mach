@@ -156,6 +156,13 @@ _LOG = logging.getLogger("care")
 # the case history and never opens a turn. Wait briefly and read it back from history.
 _PULL_TRIES = 60
 _PULL_PAUSE = 0.1  # same 6 s budget, but a Ledger answer is seen within 0.1 s
+# Facility hold/commit with a slow Ledger (21 Nov, wave W01QQQ): "held" came minutes after the
+# hold, our 6 s wait ended the turn, the late answer did not open a turn, and the booking centre
+# told the citizen "la ricevuta arriva tra pochi secondi" that never came (25 confirms on our
+# own facilities). Keep reading the case for up to _HOLD_WAIT (scaled with _PULL_PAUSE, so the
+# fake-city tests stay fast).
+_HOLD_WAIT = 150.0
+_HOLD_POLL = 2.0
 # Needs whose sent offers this process remembers; the oldest is forgotten first.
 _SENT_NEEDS = 4096
 
@@ -5169,12 +5176,49 @@ def _latest_hold(chat: list[Message], agent: str) -> tuple[str, str | None]:
     return consent, number
 
 
+async def _await_patient(
+    city: City,
+    need_id: str | None,
+    chat: list[Message],
+    head: str,
+    token: str,
+    *,
+    op: str,
+) -> tuple[Message, list[Message]] | None:
+    """_await_line, then keep reading the case every _HOLD_POLL s up to _HOLD_WAIT."""
+
+    found = await _await_line(city, need_id, chat, head, token, op=op)
+    if found is not None:
+        return found
+    budget = min(_HOLD_WAIT, _PULL_PAUSE * 1500)
+    poll = min(_HOLD_POLL, max(_PULL_PAUSE * 20, 0.001))
+    known = {row.msg_id for row in chat}
+    start = time.monotonic()
+    while time.monotonic() - start < budget:
+        await asyncio.sleep(poll)
+        try:
+            fresh = await city.history(need_id=need_id)
+        except CapError:
+            continue
+        hit = _latest(fresh, head, token)
+        if hit is not None:
+            return hit, fresh
+        for row in fresh:
+            if row.msg_id in known or row.sender != LEDGER:
+                continue
+            if first_word(row.text) == "refused" and (
+                op in words(row.text) or f"op={op}" in row.text or f"operation={op}" in row.text
+            ):
+                return row, fresh
+    return None
+
+
 async def _finish_booking(
     city: City, message: Message, chat: list[Message], slot: str, *, hold_self: bool
 ) -> None:
     """Hold is in the mailbox. Read the held line and commit before this turn ends."""
 
-    found = await _await_line(city, message.need_id, chat, "held", f"slot_id={slot}", op="hold")
+    found = await _await_patient(city, message.need_id, chat, "held", f"slot_id={slot}", op="hold")
     if found is None:
         _LOG.info("care.held.missing", extra={"need_id": (message.need_id or "")[:48]})
         return
@@ -5186,7 +5230,7 @@ async def _finish_booking(
     hold_id = fields_of(reply.text).get("hold_id", "")
     if not hold_id:
         return
-    done = await _await_line(
+    done = await _await_patient(
         city, message.need_id, fresh, "committed", f"booking_id={hold_id}", op="commit"
     )
     if done is None:
@@ -5209,6 +5253,8 @@ async def _on_held(city: City, message: Message, chat: list[Message]) -> None:
         return
     if _our_commit(chat, city.agent_id, hold_id):
         return
+    if not _once(f"commit:{hold_id}"):
+        return  # a parallel turn (late "held" + the patient waiter) is committing it already
     _, consent, number = _booking_of(chat, city.agent_id, slot)
     if not consent:
         consent, held_number = _latest_hold(chat, city.agent_id)
@@ -5246,6 +5292,8 @@ async def _on_committed(city: City, message: Message, chat: list[Message]) -> No
     token = f"booking_id={booking_id}"
     if _we(chat, city.agent_id, token, to=target, word="booking.receipt"):
         return
+    if not _once(f"receipt:{booking_id}:{target}"):
+        return  # one receipt per booking, even with two turns reading the same commit
     extra = ""
     if target.startswith("agent:") and slot:
         # MACH-1: a partner's booking centre matches the receipt to its offer.
