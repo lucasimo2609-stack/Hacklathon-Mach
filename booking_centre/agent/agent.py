@@ -27,6 +27,7 @@ ROLES = ("booking_centre", "gp", "hospital", "specialist_care", "family_counseli
 _MAX_PAGE = 20  # pages start at the world's first week: the current week can be far in
 # Four agenda hours is about half a minute of real time at 480x, so a slot is still
 # ahead when the citizen decides. One hour was already past by then.
+_LEAD_PLANNED = timedelta(hours=2)  # 6 h broke level-4 scarcity tests (same-day slots); keep 2 h
 _LEAD = timedelta(hours=2)  # level 4 (scarcity): keep same-day slots; the chain takes seconds
 # Doctor key (the last segment of doctor_id) -> languages, gender, days. ``*`` is the ASST's
 # rare language. The Ledger's slot line names the doctor; it does not repeat this table.
@@ -1271,7 +1272,7 @@ def fitting(
         horizon = None
     else:
         horizon = _agenda_plus(now, _DEADLINE_DAYS.get(priority or "", 14))
-    earliest = now + _LEAD
+    earliest = now + (_LEAD if priority == "U" else _LEAD_PLANNED)
     chosen: list[tuple[datetime, dict[str, str]]] = []
     for line in lines:
         slot = fields_of(line)
@@ -2253,6 +2254,14 @@ def _number_in_words(text: str) -> str | None:
 
 
 def _lang(chat: list[Message]) -> str:
+    # What the citizen explicitly asks for wins over the profile token: lang=de citizens wrote
+    # "a doctor who speaks English", we searched partners for German and the journey stopped
+    # (21 Nov, ...254/...212/...151), while our own h1/s1/c1 speak English.
+    for row in chat:
+        if row.sender.startswith("citizen:"):
+            asked = _lang_asked(row.text or "")
+            if asked:
+                return asked
     said = []
     for row in chat:
         if row.sender.startswith("citizen:"):
@@ -2293,8 +2302,18 @@ _LANG_ASK = re.compile(
 )
 
 
+_LANG_ADJ = re.compile(
+    r"\b([a-z]+)[ -](?:speaker|speaking)\b|\b([a-z]+)fon[oa]\b"
+)
+
+
 def _lang_asked(text: str) -> str:
-    for word in _LANG_ASK.findall(_fold(text)):
+    folded = _fold(text)
+    for left, fono in _LANG_ADJ.findall(folded):
+        code = _LANG_NAMES.get(left) or {"anglo": "en", "franco": "fr", "ispano": "es"}.get(fono, "")
+        if code and code != "it":
+            return code
+    for word in _LANG_ASK.findall(folded):
         code = _LANG_NAMES.get(word)
         if code and code != "it":
             return code
@@ -2700,6 +2719,12 @@ _DESK_SAY: dict[str, dict[str, str]] = {
         "fr": "Merci ! Je cherche dans les ASST voisines : dans quelques secondes je vous "
         "envoie les horaires disponibles, tous dans un seul message.",
     },
+    "ask_days": {
+        "it": "Così le propongo solo orari che le vanno bene: in quali giorni della settimana può "
+        "venire? E preferisce un medico donna o uomo, o le è indifferente?",
+        "en": "So I only offer times that suit you: which weekdays can you come? And do you "
+        "prefer a female or male doctor, or does it not matter?",
+    },
     "receipt": {
         "it": "Prenotazione confermata: ho bloccato il posto direttamente con la struttura, che "
         "ha già i suoi dati e la aspetta, quindi non deve telefonare a nessuno. Porti con sé la "
@@ -2956,6 +2981,7 @@ async def _advance_alone(
             break
         if _pass == 2:
             wanted = procedure
+            await _ask_own_facility(city, chat, procedure, priority, message.need_id)
             chat = await _slow_ledger(
                 city, message, chat, citizen, key,
                 lambda rows: (_has_agenda(rows) or _agenda_now() is not None)
@@ -3074,9 +3100,25 @@ async def _advance_alone(
     # Up to _OFFERS slots that keep the citizen's stated gender: more doctors and days cover
     # more unspoken preferences (S_pref, +2). Slots that drop the stated gender only fill up
     # to _MIN_OFFERS, so a long list never pushes the citizen toward a slot outside S.
-    chosen = _diverse((preferred, best), _OFFERS)
-    if len(chosen) < _MIN_OFFERS:
-        chosen = _diverse((preferred, best, relaxed), _MIN_OFFERS)
+    if days and preferred:
+        # The citizen named their days ("solo di martedì o venerdì"): only those days. Padding
+        # with other days made journey ...298 cancel the whole list (-1, slots were free).
+        chosen = _diverse((preferred,), _OFFERS)
+    else:
+        chosen = _diverse((preferred, best), _OFFERS)
+        if len(chosen) < _MIN_OFFERS:
+            chosen = _diverse((preferred, best, relaxed), _MIN_OFFERS)
+    if (
+        chosen
+        and not replacing
+        and not days
+        and fixed is None
+        and _vague_days(chat)
+        and await _ask_preferences(city, chat, citizen, message)
+    ):
+        # "Only certain days" without naming them (journey ...225 cancelled every guess):
+        # ask once, like the kit's booking example; the answer opens the next turn.
+        return
     if chosen and not replacing:
         # Several turns of one case (a Ledger answer, a second replica) can reach this point
         # together: read the case again and send nothing if another turn already offered.
@@ -3226,6 +3268,91 @@ def _pending_booking_consent(chat: list[Message], agent: str, message: Message) 
     return ""
 
 
+_VAGUE_DAYS = re.compile(
+    r"\b(solo|soltanto)?\s*(in\s+)?(determinati|certi|alcuni|pochi)\s+giorni|disponibilita\s+limitata"
+    r"|\bsome days\b|\bcertain days\b|\bonly on (some|certain|a few) days\b|\blimited (days|availability)"
+)
+
+
+def _vague_days(chat: list[Message]) -> bool:
+    """The citizen limits their days without naming them."""
+
+    return any(
+        row.sender.startswith("citizen:") and _VAGUE_DAYS.search(_fold(row.text or ""))
+        for row in chat
+    )
+
+
+async def _ask_preferences(city: City, chat: list[Message], citizen: str, message: Message) -> bool:
+    """Ask once which days (and doctor gender) suit the citizen. False if already asked, so
+    a citizen who does not answer still gets offers on their next message."""
+
+    agent = city.agent_id
+    if _we(chat, agent, "fields=days,gender", to=citizen, word="data.request"):
+        return False
+    await _say(
+        city, citizen,
+        "data.request purpose=booking fields=days,gender " + _desk_line("ask_days", chat),
+    )
+    return True
+
+
+_OWN_FACILITY_IDS = frozenset(set(_BY_PROCEDURE.values()))
+
+
+async def _ask_own_facility(
+    city: City, chat: list[Message], procedure: str, priority: str | None, need_id: str | None
+) -> None:
+    """Booking centre -> our own facility, directly: "which free slots do you have?". The
+    facility answers in milliseconds from its own copy of its slots, so a slow Ledger does
+    not leave the citizen waiting. Once per case; the Ledger answer still wins when it comes."""
+
+    facility = _BY_PROCEDURE.get(procedure or "", "")
+    if not facility or facility == city.agent_id:
+        return
+    if any(row.sender == city.agent_id and row.recipient == facility
+           and first_word(row.text) == "need.request" for row in chat):
+        return
+    await _say(
+        city, facility,
+        f"need.request procedure={procedure} priority={priority or 'D'} request_id={need_id or 'case'} "
+        "source=own_asst Richiesta interna: quali posti liberi avete?",
+    )
+
+
+def _own_facility_slots(chat: list[Message], agent: str, procedure: str) -> str | None:
+    """Our own facility's direct answer, as a world slot list (None when it has not answered)."""
+
+    facility = _BY_PROCEDURE.get(procedure or "", "")
+    if not facility:
+        return None
+    lines: list[str] = []
+    answered = False
+    for row in chat:
+        if row.sender != facility:
+            continue
+        if first_word(row.text) == "cancel" and "no_availability" in row.text:
+            answered = True
+            lines = []
+            continue
+        offers = [o for o in _offers_in(row.text) if o.get("slot_id")]
+        if not offers:
+            continue
+        answered = True
+        lines = []
+        for o in offers:
+            at = o.get("agenda_date") or o.get("at") or ""
+            if o.get("procedure") not in (None, "", procedure) or not at:
+                continue
+            lines.append(
+                f"slot_id={o['slot_id']} doctor_id={o.get('doctor_id', '')} facility={facility} "
+                f"procedure={procedure} at={at} day={o.get('agenda_day', '')} free=1"
+            )
+    if not answered:
+        return None
+    return chr(10).join([f"slots procedure={procedure} page=1/1 source=own_asst"] + lines)
+
+
 _PREFETCH = ("VIS-FIS", "VIS-CARD")
 _SLOW_WAIT = 45.0  # a slow Ledger: keep the turn alive this long before giving the citizen up
 _SLOW_POLL = 1.0
@@ -3294,7 +3421,9 @@ def _slots_for(chat: list[Message], agent: str, procedure: str) -> str | None:
     # Every unmatched request has its (empty) answer: our ASST has no slot for this procedure.
     if empty and procedure in unmatched and len(empty) >= len(unmatched):
         return empty[0]
-    return None
+    # The Ledger is silent: our own facility's direct answer (its cached slot list) is the
+    # same world, read by the facility itself.
+    return _own_facility_slots(chat, agent, procedure)
 
 
 def _rx_line(chat: list[Message], number: str | None) -> dict[str, str] | None:
@@ -3392,10 +3521,10 @@ def _partner_offers(chat: list[Message], agent: str) -> list[tuple[str, dict[str
     asked = {
         row.recipient for row in chat
         if row.sender == agent and row.recipient.startswith("agent:") and "need.request" in words(row.text)
-    }
+    } - _OWN_FACILITY_IDS
     found: list[tuple[str, dict[str, str]]] = []
     for row in chat:
-        if row.sender == agent or not row.sender.startswith("agent:"):
+        if row.sender == agent or not row.sender.startswith("agent:") or row.sender in _OWN_FACILITY_IDS:
             continue
         if "offer" not in words(row.text):
             continue
@@ -3659,7 +3788,7 @@ def _partners_pending(chat: list[Message], agent: str, only: str = "") -> int:
     answered = {
         row.sender for index, row in enumerate(chat) if row.sender in last and index > last[row.sender]
     }
-    pending = set(last) - answered
+    pending = set(last) - answered - _OWN_FACILITY_IDS
     return len(pending & {only}) if only else len(pending)
 
 
@@ -3888,7 +4017,12 @@ async def _cross_turn(city: City, message: Message, chat: list[Message], citizen
                 # once (journeys ...187/...204 ended on "in a few seconds I will send the times").
                 if _once(f"cross-none:{key}"):
                     await _say(city, citizen, _desk_line("cross_none", chat))
-                elif message.sender == citizen and _YES.search(_fold(message.text)):
+                elif message.sender == citizen and (
+                    _YES.search(_fold(message.text))
+                    or re.search(r"offer_id|slot_id|which offer|quale offerta", _fold(message.text))
+                ):
+                    # "Yes", or "Which offer_id, slot_id?" (21 Nov ...254/...212/...151 stopped
+                    # there): give them the waiting-list offer with its id.
                     # "Yes" to our closing line: the waiting list after all (a new offer id).
                     await _waiting_list(city, chat, citizen, message.need_id, f"wl2-{message.need_id or 'case'}")
             else:
