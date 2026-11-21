@@ -1074,6 +1074,7 @@ _RARE_BY_ASST: dict[str, str] = {
     "giambellino": "ka", "toros": "ro", "precotto": "ro", "nord": "ur", "corvetto": "fr",
     "brera": "fa", "isola": "tl", "ortica": "wo", "greco": "si", "bicocca": "ti", "lambrate": "ja",
     "gorla": "sq", "forlanini": "de", "citta-studi": "tr", "cittastudi": "tr",
+    "san-siro": "bn",
 }
 _DISTRICT_BY_LANG: dict[str, int] = {
     "ro": 9, "ur": 2, "fr": 3, "fa": 7, "tl": 8, "wo": 6, "de": 5, "sq": 8, "tr": 2, "ja": 3, "si": 7, "ti": 4,
@@ -2250,6 +2251,8 @@ def _script_lang(text: str) -> str:
         return "si"  # Sinhala script
     if re.search(r"[\u1200-\u137f]", text):
         return "ti"  # Ge'ez script: Tigrinya (only Bicocca has an Ethiopic-language doctor)
+    if re.search(r"[\u0980-\u09ff]", text):
+        return "bn"  # Bengali script (San Siro's h3)
     if re.search(r"[\u4e00-\u9fff]", text):
         return "zh"
     if re.search(r"[\u0400-\u04ff]", text):
@@ -3631,7 +3634,9 @@ async def _cross_turn(city: City, message: Message, chat: list[Message], citizen
             pass
     # Partners answer in 5-35 s (journeys 510002/530002/940006/000172 got a waiting list after
     # 3-5 s, then partner slots arrived): keep waiting while a partner we asked is silent.
-    procedure = rx.get("procedure", "")
+    # The consultorio has no prescription: its procedure is CONS-GIN (journey ...216 ended on
+    # "in a few seconds" after the waiting list was turned down).
+    procedure = rx.get("procedure", "") or ("CONS-GIN" if role_of() == "family_counseling" else _visit_procedure(chat) or "")
     rare = _lang_partner(chat, procedure) if procedure else ""
     while (
         _partners_pending(chat, agent)
