@@ -1154,16 +1154,35 @@ async def _until(
     """Re-read the case until ``ready`` or the short wait ends. The push may never arrive."""
 
     fresh = chat
-    for attempt in range(_PULL_TRIES):
+    for pause in _poll_pauses():
         try:
             fresh = await city.history(need_id=need_id)
         except CapError:
             fresh = chat
         if ready(fresh):
             return fresh
-        if attempt + 1 < _PULL_TRIES:
-            await asyncio.sleep(_PULL_PAUSE)
+        if pause is None:
+            break
+        await asyncio.sleep(pause)
     return fresh
+
+
+def _poll_pauses():
+    """Pauses between case reads inside the short wait (_PULL_TRIES * _PULL_PAUSE, 6 s live):
+    the first read is quick, then the gap grows x1.5 up to 10 * _PULL_PAUSE. 21 Nov 13:40: the
+    booking centre made 32 history reads in 2 s while dozens of turns waited on a slow Ledger,
+    loading the relay and holding its 80 slots; ~11 reads per wait instead of 60. Yields the
+    pause before the next read, then None when the budget is spent."""
+
+    budget = _PULL_TRIES * _PULL_PAUSE
+    cap = 10 * _PULL_PAUSE
+    pause = _PULL_PAUSE
+    spent = 0.0
+    while spent + pause <= budget:
+        yield pause
+        spent += pause
+        pause = min(pause * 1.5, cap)
+    yield None
 
 
 async def _await_line(
@@ -1179,7 +1198,7 @@ async def _await_line(
 
     known = {row.msg_id for row in chat}
     fresh = chat
-    for attempt in range(_PULL_TRIES):
+    for pause in _poll_pauses():
         try:
             fresh = await city.history(need_id=need_id)
         except CapError:
@@ -1194,8 +1213,9 @@ async def _await_line(
                 op in words(row.text) or f"op={op}" in row.text or f"operation={op}" in row.text
             ):
                 return row, fresh
-        if attempt + 1 < _PULL_TRIES:
-            await asyncio.sleep(_PULL_PAUSE)
+        if pause is None:
+            break
+        await asyncio.sleep(pause)
     return None
 
 
@@ -3217,6 +3237,13 @@ async def _advance_alone(
             world = _slots_for(chat, agent, procedure)
             if now is not None and world is not None:
                 break
+            # 21 Nov 12:00-13:00: ~15 journeys got the holding line and then nothing (the
+            # Ledger never answered in time) -> -1 no_alternative with an empty answer set.
+            # The waiting list is the relaxed alternative (0); it is marked "slow" so the
+            # real times are still offered when the Ledger's slots arrive later (upgrade).
+            if citizen and not _offered(chat, agent):
+                await _waiting_list(city, chat, citizen, message.need_id,
+                                    offer_id=f"{_SLOW_WL}{message.need_id or 'case'}")
             return
         if now is None and not _exact(chat, agent, "agenda"):
             await _say(city, LEDGER, "agenda")
@@ -3356,6 +3383,7 @@ async def _advance_alone(
         still_open = any(o["slot_id"] not in _declined(latest, agent) for o in fresh_batch)
         if (_offered(latest, agent) and (still_open or not fresh_batch)) or any(
             row.sender == agent and row.recipient == citizen and "waiting_list=true" in row.text
+            and f"offer_id={_SLOW_WL}" not in row.text  # a slow-register waiting list upgrades
             for row in latest
         ):
             return
@@ -3581,8 +3609,9 @@ def _own_facility_slots(chat: list[Message], agent: str, procedure: str) -> str 
 
 _PREFETCH = ("VIS-FIS", "VIS-CARD")
 _SLOW_WAIT = 120.0  # a slow Ledger: 45 s was not enough on 21 Nov (holding lines left 8-10 min)
+_SLOW_WL = "wl-slow-"  # waiting list sent when the Ledger never answered: real slots still upgrade it
 _SLOW_REASK = 60.0  # half-way: ask the Ledger again, its first answer may be lost
-_SLOW_POLL = 1.0
+_SLOW_POLL = 3.0  # 1 s polled the relay 120 times per slow case (21 Nov 13:40 overload); 3 s = 40
 
 
 async def _slow_ledger(

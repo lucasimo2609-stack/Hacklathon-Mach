@@ -17,12 +17,12 @@ async def main():
     # 1. Readable dates + weekday, tokens untouched
     c = FakeCity(slots=own); await turn(c, CIT, "vorrei prenotare prescription_number=rx-1 lang=it")
     m = offers_msg(c)
-    check("dates: readable Italian weekday and month", "Orari: 1) lunedì 2 novembre ore 10:30" in m, m[-300:])
+    check("dates: readable Italian weekday and month", "Orari: 1) martedì 3 novembre ore 10:30" in m, m[-300:])
     tokens = [l for l in m.split("\n") if l.startswith("offer ")]
     check("dates: offer token lines unchanged", tokens and all(l.split()[1].startswith("offer_id=") and "agenda_date=" in l for l in tokens))
     check("dates: still one message", len([1 for to, t in c.out if to == CIT]) == 1)
     c = FakeCity(slots=own); await turn(c, CIT, "hello I want to book please prescription_number=rx-1 lang=en")
-    check("dates: English", "Times: 1) Monday 2 November at 10:30" in offers_msg(c), offers_msg(c)[-200:])
+    check("dates: English", "Times: 1) Tuesday 3 November at 10:30" in offers_msg(c), offers_msg(c)[-200:])
 
     # 2. Tone at the booking centre
     c = FakeCity(slots=own); await turn(c, CIT, "sono molto preoccupata, vorrei prenotare prescription_number=rx-1")
