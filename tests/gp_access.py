@@ -90,7 +90,10 @@ async def main():
     c = G(rows="world rows=2\nsymptom_code=SYM-BACK procedure=VIS-FIS priority=B\nsymptom_code=SYM-SHOULDER procedure=VIS-FIS priority=D")
     await gp(c, "ho mal di schiena")
     order = [r.recipient for r in c.rows if r.sender == GPID]
-    check("protocol: world asked after citizen and booking", order[-1] == LEDGER and order.index(GCIT) < order.index(LEDGER, 1), str(order))
+    sent = [(r.recipient, r.text) for r in c.rows if r.sender == GPID]
+    bare = next(i for i, (to, t) in enumerate(sent) if to == LEDGER and t == "world")
+    reply = next(i for i, (to, _) in enumerate(sent) if to == GCIT)
+    check("protocol: table read (bare world) only after the citizen is answered", reply < bare, str(order))
     check("protocol: new row learned", A._PROTOCOLS.get("SYM-SHOULDER") == ("VIS-FIS", "D"))
     await gp(G(), "ho mal di ginocchio")
     check("protocol: asked once per process", A._PROTOCOL_ASKED)

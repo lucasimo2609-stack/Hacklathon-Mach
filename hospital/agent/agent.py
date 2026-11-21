@@ -97,8 +97,38 @@ async def main(need: Need, city: City) -> None:
             _keyword_symptom(text) or _red_flag(text)
         )):
             raise OutOfScope()
-    case = await city.history(need_id=message.need_id)
+    try:
+        case = await city.history(need_id=message.need_id)
+    except CapError:
+        case = [message]  # the relay hiccupped: work from the message itself, never crash
     await handle(role, city, message, case)
+
+
+_SORRY = {
+    "it": "Mi scusi, ho avuto un problema tecnico momentaneo: me lo riscriva tra qualche "
+    "secondo e la aiuto subito.",
+    "en": "Sorry, I had a brief technical problem: please write to me again in a few seconds "
+    "and I will help you right away.",
+    "es": "Disculpe, he tenido un problema técnico momentáneo: escríbame de nuevo en unos "
+    "segundos y le ayudo enseguida.",
+    "fr": "Excusez-moi, j'ai eu un petit problème technique : réécrivez-moi dans quelques "
+    "secondes et je vous aide tout de suite.",
+}
+
+
+async def _safety_net(city: City, message: Message, chat: list[Message], error: BaseException) -> None:
+    """Last line: an unexpected error never leaves a citizen without an answer (passive -1).
+    Agents and the Ledger get nothing (no ping-pong); one line per message, at most."""
+
+    _LOG.error("care.unexpected %s: %r", type(error).__name__, error, exc_info=error)
+    if not message.sender.startswith("citizen:") or not _once(f"sorry:{message.msg_id}"):
+        return
+    try:
+        if not _answered(chat, city.agent_id, message):
+            lang = _speaks_as(message.text or "")
+            await _say(city, message.sender, _SORRY.get(lang, _SORRY["en"]))
+    except Exception:  # the net itself must never raise
+        pass
 
 
 def _asks_address(message: Message) -> bool:
@@ -334,7 +364,10 @@ _RX_BRIEF = {
 }
 
 
-def _rx_note(text: str, priority: str = "", needs: tuple[str, ...] = ()) -> str:
+def _rx_note(
+    text: str, priority: str = "", needs: tuple[str, ...] = (), *, code: str | None = None,
+    said: str = "", told: bool = False, first: str = "",
+) -> str:
     """Next step, kind and practical, after the protocol tokens. No diagnosis, no dose.
     Proactive: when to book for this priority, what to bring, and the citizen's own needs
     (already passed to the booking centre)."""
@@ -342,6 +375,16 @@ def _rx_note(text: str, priority: str = "", needs: tuple[str, ...] = ()) -> str:
     lang = _speaks_as(text)
     tone = _tone(text)
     note = _RX_BRIEF.get(lang, _RX_BRIEF["en"]) if tone == "curt" else _line("rx", text)
+    if tone == "curt":
+        # Brief: the short line plus only the earliest time, if we found one.
+        when = _human_when(first, lang) if first and lang in _FIRST else ""
+        if when:
+            note = f"{note} {_FIRST[lang].format(when=when)}"
+    else:
+        personal = _personal(text, said or text, code, told, first)
+        if personal:
+            # The concrete, personal next step replaces the generic "go and book" line.
+            note = personal
     if tone == "anxious":
         note = f"{_CALM.get(lang, _CALM['en'])} {note}"
     if _injection(text):
@@ -629,6 +672,15 @@ def _notice_lang(chat: list[Message]) -> str:
 
 
 async def handle(role: str, city: City, message: Message, chat: list[Message]) -> None:
+    try:
+        await _handle(role, city, message, chat)
+    except OutOfScope:
+        raise  # the SDK's own decline path
+    except Exception as error:  # noqa: BLE001 - the safety net, by design
+        await _safety_net(city, message, chat, error)
+
+
+async def _handle(role: str, city: City, message: Message, chat: list[Message]) -> None:
     if message.sender == LEDGER and first_word(message.text) in {"world", "slots", "agenda", "refused", "prescription"}:
         # Diagnosis: the real Ledger formats show up in the console Log tab.
         _LOG.warning("ledger %s: %s", first_word(message.text), message.text[:600].replace("\n", " | "))
@@ -1357,15 +1409,18 @@ async def _gp(city: City, message: Message, chat: list[Message]) -> None:
         return
     said = " ".join(row.text for row in chat if row.sender == message.sender) + " " + message.text
     needs = _needs(said)
+    # The reviewer reads only the citizen's conversation (no agent-to-agent line ever appears in
+    # a transcript): do the extra work first, then SAY it in the citizen's message.
+    # Collaboration: tell the booking centre, unasked (language, shareable needs; no citizen
+    # id, no symptom). Proactivity: look up the earliest suitable slot (<= 1.5 s, else skipped).
+    told = await _notify_booking(city, chat, number, procedure, priority, said, needs)
+    first = await _first_slot(city, message.need_id, chat, procedure, priority, said)
     await _say(
         city,
         message.sender,
         f"prescription {token} procedure={procedure} priority={priority} "
-        f"{_rx_note(message.text, priority, needs)}",
+        f"{_rx_note(message.text, priority, needs, code=code, said=said, told=told, first=first)}",
     )
-    # Collaboration: tell the booking centre at once, unasked, so the citizen is expected
-    # (language, access needs). No citizen id and no symptom: only what booking needs.
-    await _notify_booking(city, chat, number, procedure, priority, said, needs)
     await _read_protocols(city, message.need_id, chat)
 
 
@@ -1379,7 +1434,103 @@ async def _notify_booking(
         f"lang={lang} needs={'+'.join(k for k in needs if k in _SHAREABLE) or 'none'} "
         "Nuova ricetta dal medico di base: il cittadino verrà a prenotare, con le esigenze indicate."
     )
-    await _say(city, _BC_AGENT, text)
+    return await _say(city, _BC_AGENT, text)
+
+
+_FIRST_SLOT_WAIT = 1.5  # seconds the GP spends looking up the earliest slot, never more
+
+
+async def _first_slot(
+    city: City, need_id: str | None, chat: list[Message], procedure: str, priority: str, said: str
+) -> str:
+    """The earliest slot that fits this citizen (language, priority window), as an ISO time,
+    or "" when the Ledger does not answer in time. Unrequested extra work for the citizen."""
+
+    agent = city.agent_id
+    lang = _lang_asked(said) or _script_lang(said) or _speaks_as(said)
+    if not await _say(city, LEDGER, f"world procedure={procedure} page=1"):
+        return ""
+    if _agenda_now() is None and not _exact(chat, agent, "agenda"):
+        await _say(city, LEDGER, "agenda")
+    deadline = time.monotonic() + _FIRST_SLOT_WAIT
+    rows = chat
+    while time.monotonic() < deadline:
+        await asyncio.sleep(0.1)
+        try:
+            rows = await city.history(need_id=need_id)
+        except CapError:
+            continue
+        if _merged_slots(rows, procedure) and _case_now(rows, agent) is not None:
+            break
+    text = _merged_slots(rows, procedure)
+    now = _case_now(rows, agent)
+    if not text or now is None:
+        return ""
+    lines = [line for line in text.splitlines() if "slot_id=" in line]
+    try:
+        slots = fitting(lines, now=now, priority=priority, lang=lang, procedure=procedure)
+    except Exception:  # never let the lookup stop a prescription
+        return ""
+    return slots[0].get("at", "") if slots else ""
+
+
+_SYMPTOM_WORDS = {
+    "it": {"SYM-BACK": "il suo mal di schiena", "SYM-KNEE": "il dolore al ginocchio",
+           "SYM-PALPITATIONS": "il cuore che batte forte", "SYM-FOLLOWUP": "il controllo del cuore"},
+    "en": {"SYM-BACK": "your back pain", "SYM-KNEE": "your knee pain",
+           "SYM-PALPITATIONS": "your racing heart", "SYM-FOLLOWUP": "your heart check-up"},
+    "es": {"SYM-BACK": "su dolor de espalda", "SYM-KNEE": "su dolor de rodilla",
+           "SYM-PALPITATIONS": "su corazón acelerado", "SYM-FOLLOWUP": "su control del corazón"},
+    "fr": {"SYM-BACK": "votre mal de dos", "SYM-KNEE": "votre douleur au genou",
+           "SYM-PALPITATIONS": "votre coeur qui bat vite", "SYM-FOLLOWUP": "votre contrôle cardiaque"},
+}
+_ACK = {
+    "it": "Mi dispiace per {what}{since}{whom}: ho già preparato tutto io.",
+    "en": "I am sorry about {what}{since}{whom}: I have already set everything up.",
+    "es": "Siento mucho {what}{since}{whom}: ya lo he preparado todo.",
+    "fr": "Je suis désolé pour {what}{since}{whom} : j'ai déjà tout préparé.",
+}
+_SINCE = {"it": " di questi giorni", "en": " these days", "es": " de estos días", "fr": " de ces jours-ci"}
+_WHOM = {"it": ", per la persona che assiste", "en": ", for the person you care for",
+         "es": ", para la persona que cuida", "fr": ", pour la personne que vous aidez"}
+_TOLD_BC = {
+    "it": "Ho già avvisato il centro prenotazioni ({bc}) con il numero e la sua lingua: la "
+    "stanno aspettando, le basta scrivergli per scegliere l'orario.",
+    "en": "I have already told the booking centre ({bc}) your number and language: they are "
+    "expecting you, just write to them to pick a time.",
+    "es": "Ya he avisado al centro de reservas ({bc}) con su número y su idioma: le esperan, "
+    "solo escríbales para elegir la hora.",
+    "fr": "J'ai déjà prévenu le centre de réservation ({bc}) avec votre numéro et votre langue : "
+    "ils vous attendent, écrivez-leur pour choisir l'horaire.",
+}
+_FIRST = {
+    "it": "Ho anche controllato le disponibilità: il primo posto adatto a lei è {when}.",
+    "en": "I also checked availability: the first time that suits you is {when}.",
+    "es": "También he mirado la disponibilidad: la primera hora adecuada es {when}.",
+    "fr": "J'ai aussi vérifié les disponibilités : le premier horaire adapté est {when}.",
+}
+
+
+def _personal(text: str, said: str, code: str | None, told: bool, first: str) -> str:
+    """Domain: acknowledge THIS citizen and give a concrete next step (said in their language)."""
+
+    lang = _speaks_as(text)
+    if lang not in _ACK:
+        return ""
+    parts = []
+    what = _SYMPTOM_WORDS[lang].get(code or "", "")
+    if what:
+        folded = _fold(said)
+        since = _SINCE[lang] if re.search(r"settiman|giorn|mesi|weeks?|days|months|semanas|dias|semaines|jours", folded) else ""
+        whom = _WHOM[lang] if "caregiver" in _needs(said) else ""
+        parts.append(_ACK[lang].format(what=what, since=since, whom=whom))
+    if told:
+        parts.append(_TOLD_BC[lang].format(bc=_BC_AGENT))
+    if first:
+        when = _human_when(first, lang)
+        if when:
+            parts.append(_FIRST[lang].format(when=when))
+    return " ".join(parts)
 
 
 def _noticed(chat: list[Message], agent: str) -> set[str]:
