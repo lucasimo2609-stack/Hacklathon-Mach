@@ -165,6 +165,35 @@ _PULL_PAUSE = 0.1  # same 6 s budget, but a Ledger answer is seen within 0.1 s
 # own facilities). Keep reading the case for up to _HOLD_WAIT (scaled with _PULL_PAUSE, so the
 # fake-city tests stay fast).
 _HOLD_WAIT = 150.0
+# Load control (21 Nov 13:50: requests between agents queued up). A facility turn that waits on
+# the Ledger holds one of the ~40 concurrent slots; past _BUSY_AT waiting turns every new wait
+# gets a fifth of its budget, so fresh requests are not stuck behind old ones. Requests older
+# than _STALE_REQUEST real seconds (= agenda hours) are answered from what we have, never by
+# waiting on the Ledger again.
+_INFLIGHT = 0
+_BUSY_AT = 16
+_STALE_REQUEST = 600.0
+
+
+def _age(message: Message) -> float | None:
+    """Real seconds since the message was sent (None when the stamp is missing or odd)."""
+
+    stamp = _when(getattr(message, "sent_at", "") or "")
+    if stamp is None:
+        return None
+    try:
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - stamp).total_seconds()
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return age if age >= 0 else 0.0
+
+
+def _budget(full: float) -> float:
+    """The wait a turn may spend now: the full budget, or a fifth of it when busy."""
+
+    return full if _INFLIGHT < _BUSY_AT else full / 5
 _HOLD_POLL = 2.0
 # Needs whose sent offers this process remembers; the oldest is forgotten first.
 _SENT_NEEDS = 4096
@@ -4319,6 +4348,22 @@ async def _on_confirm(
         return
     if not slot or not consent:
         return
+    if from_citizen and offer_id:
+        # MACH R21 for citizens: the same confirm gets the same receipt. A citizen repeating a
+        # confirm we already booked was told "la ricevuta arriva tra pochi secondi" again.
+        # Only the SAME offer_id counts: confirming a new alternative after a cancel books it.
+        token = f"offer_id={offer_id}"
+        earlier = next((i for i, row in enumerate(chat)
+                        if row.sender == message.sender and row.msg_id != message.msg_id
+                        and "confirm" in words(row.text) and token in row.text.split()), None)
+        if earlier is not None:
+            receipts = [row for row in chat[earlier:]
+                        if row.sender == agent and row.recipient == message.sender
+                        and first_word(row.text) == "booking.receipt"]
+            if receipts:
+                if _once(f"dup-citizen-confirm:{message.msg_id}"):
+                    await _say(city, message.sender, receipts[-1].text)
+                return
     citizen = fields.get("citizen") or (
         message.sender if message.sender.startswith("citizen:") else ""
     )
@@ -4379,9 +4424,16 @@ async def _on_confirm(
             parts.append(f"consent_ref={cross_ref or consent}")
             if cross_ref:
                 parts.append(f"cross_asst_consent_ref={cross_ref}")
-            if not await _say(city, LEDGER, " ".join(parts)):
-                return
-            _HELD[slot] = time.monotonic()
+            text = " ".join(parts)
+            # Two identical confirms in the same second (21 Nov ...360007) both reached here
+            # before either hold was in the case: two holds on one slot, the second refused
+            # SLOT_TAKEN on its own turn. One hold per exact command; the duplicate turn waits
+            # for the same held line (commit and receipt are guarded too). A re-confirm with a
+            # new consent is a different command and still holds.
+            if _once(f"hold-sent:{message.need_id}:{text}"):
+                if not await _say(city, LEDGER, text):
+                    return
+                _HELD[slot] = time.monotonic()
         await _finish_booking(city, message, chat, slot, hold_self=hold_self)
         return
     if not facility or not citizen:
@@ -4994,6 +5046,7 @@ async def _partner_request(
     with real, free slots of THIS facility from our Ledger, all in one message.
     With ``request``/``exclude`` it re-offers after a refused hold (alternatives)."""
 
+    global _INFLIGHT
     agent = city.agent_id
     partner = partner or message.sender
     fields = fields_of(request or message.text)
@@ -5036,12 +5089,28 @@ async def _partner_request(
     _remember(chat)
     now = _agenda_now()
     own = "source=own_asst" in (message.text or "")
-    # Our own booking centre asks us because the Ledger is slow: answer at once from a copy
-    # up to 30 min old (21 Nov: 36 agenda hours of a 48 h window burnt before the first offer).
-    world = _world_now(procedure, _STALE_TTL if own else _WORLD_TTL)
+    tail = f" request_id={request_id}" if request_id else ""
+    # Close what cannot be served any more, at once and without a Ledger trip: a request whose
+    # own deadline is already behind the agenda clock.
+    deadline = _when(fields.get("deadline", "") or fields.get("before", ""))
+    if now is not None and deadline is not None:
+        try:
+            expired = deadline <= now
+        except TypeError:
+            expired = deadline.replace(tzinfo=None) <= now.replace(tzinfo=None)
+        if expired:
+            await _say(city, partner, f"cancel reason=outside_window procedure={procedure}{tail}")
+            return
+    age = _age(message)
+    hurry = (age is not None and age > _STALE_REQUEST) or _INFLIGHT >= _BUSY_AT
+    if hurry:
+        _LOG.info("care.partner.fast age=%s inflight=%s", age, _INFLIGHT)
+    # Our own booking centre asks us because the Ledger is slow, or the request queued too long
+    # / we are busy: answer at once from a copy up to 30 min old (21 Nov: 36 agenda hours of a
+    # 48 h window burnt before the first offer).
+    world = _world_now(procedure, _STALE_TTL if (own or hurry) else _WORLD_TTL)
     if now is None or world is None:
         # No fresh copy: acknowledge right away, then read the Ledger.
-        tail = f" request_id={request_id}" if request_id else ""
         # In parallel: the partner's fast reply and both Ledger reads (one round-trip, not three).
         calls = [_ack(city, partner, f"Ricevuto, verifico subito la disponibilità per procedure={procedure}{tail} .")]
         if not _exact(chat, agent, "agenda"):
@@ -5055,15 +5124,20 @@ async def _partner_request(
             # Slow Ledger (21 Nov): we answered partners "no_availability" after 6 s without
             # having seen a single slot, and they dropped us. Keep reading the case; then fall
             # back on a slot copy up to 30 min old (a taken slot fails at hold, with alternatives).
-            budget = min(_PARTNER_LEDGER_WAIT, _PULL_PAUSE * 600)
+            # Load-aware, and no long wait at all for a request that already queued too long.
+            budget = 0.0 if hurry else _budget(min(_PARTNER_LEDGER_WAIT, _PULL_PAUSE * 600))
             poll = min(_HOLD_POLL, max(_PULL_PAUSE * 20, 0.001))
             start = time.monotonic()
-            while time.monotonic() - start < budget and not ready(chat):
-                await asyncio.sleep(poll)
-                try:
-                    chat = await city.history(need_id=message.need_id)
-                except CapError:
-                    pass
+            _INFLIGHT += 1
+            try:
+                while time.monotonic() - start < budget and not ready(chat):
+                    await asyncio.sleep(poll)
+                    try:
+                        chat = await city.history(need_id=message.need_id)
+                    except CapError:
+                        pass
+            finally:
+                _INFLIGHT -= 1
         _remember(chat)
         agenda = _ledger(chat, "agenda")
         now = _when("" if agenda is None else agenda.get("agenda_now", "")) or _agenda_now()
@@ -5315,13 +5389,25 @@ async def _await_patient(
 ) -> tuple[Message, list[Message]] | None:
     """_await_line, then keep reading the case every _HOLD_POLL s up to _HOLD_WAIT."""
 
+    global _INFLIGHT
     found = await _await_line(city, need_id, chat, head, token, op=op)
     if found is not None:
         return found
-    budget = min(_HOLD_WAIT, _PULL_PAUSE * 1500)
+    budget = _budget(min(_HOLD_WAIT, _PULL_PAUSE * 1500))
     poll = min(_HOLD_POLL, max(_PULL_PAUSE * 20, 0.001))
     known = {row.msg_id for row in chat}
     start = time.monotonic()
+    _INFLIGHT += 1
+    try:
+        return await _patient_loop(city, need_id, head, token, op, known, start, budget, poll)
+    finally:
+        _INFLIGHT -= 1
+
+
+async def _patient_loop(
+    city: City, need_id: str | None, head: str, token: str, op: str,
+    known: set[str], start: float, budget: float, poll: float,
+) -> tuple[Message, list[Message]] | None:
     while time.monotonic() - start < budget:
         await asyncio.sleep(poll)
         try:
