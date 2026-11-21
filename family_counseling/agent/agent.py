@@ -175,6 +175,140 @@ _BUSY_AT = 16
 _STALE_REQUEST = 600.0
 
 
+# History load control (21 Nov, "limit the history loading"): every wait re-read the whole case
+# from the relay, so one slow-Ledger citizen cost ~24 reads and a burst of 20 cost ~480, all at
+# once. Reads now go through _history: a read younger than 5 * _PULL_PAUSE (0.5 s
+# live) is reused, turns that read the same case at the same moment share one download, at most
+# _HISTORY_GATE downloads run at a time for the whole agent, and anything this agent says drops
+# the reuse at once (so "did we answer?" checks always see our own last line).
+_HISTORY_GATE = 12
+_HISTORY_CACHE: dict = {}
+_HISTORY_FLIGHT: dict = {}
+_HISTORY_EPOCH: dict = {}
+_HISTORY_SEM: list = []
+_HISTORY_STATS = {"downloads": 0, "reused": 0, "shared": 0}
+
+
+_HISTORY_TOKENS = [0]
+
+
+def _history_source(city: City) -> int:
+    """A stable key for the relay behind this turn (live: one relay shared by all turns).
+    A token, not id(): a freed city's id can be reused and would hand out its stale case."""
+
+    source = getattr(city, "_history", None) or city
+    token = getattr(source, "_care_token", None)
+    if token is None:
+        _HISTORY_TOKENS[0] += 1
+        token = _HISTORY_TOKENS[0]
+        try:
+            source._care_token = token
+        except (AttributeError, TypeError):
+            return id(source)
+    return token
+
+
+def _history_watch(city: City) -> None:
+    """Wrap this turn's say once so every line we send invalidates the reuse."""
+
+    if getattr(city, "_care_watched", False):
+        return
+    source = _history_source(city)
+    say = getattr(city, "say", None)
+    if say is None:
+        return
+
+    async def watched(*args, **kwargs):
+        _HISTORY_EPOCH[source] = _HISTORY_EPOCH.get(source, 0) + 1
+        try:
+            return await say(*args, **kwargs)
+        finally:
+            _HISTORY_EPOCH[source] = _HISTORY_EPOCH.get(source, 0) + 1
+
+    try:
+        city.say = watched
+        city._care_watched = True
+    except (AttributeError, TypeError):
+        pass
+
+
+def _history_gate() -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    if not _HISTORY_SEM or _HISTORY_SEM[0][0] is not loop:
+        _HISTORY_SEM[:] = [(loop, asyncio.Semaphore(_HISTORY_GATE))]
+    return _HISTORY_SEM[0][1]
+
+
+def _with_inbound(city: City, need_id: str | None, rows: list[Message]) -> list[Message]:
+    inbound = getattr(city, "inbound", None)
+    if (
+        inbound is not None
+        and getattr(inbound, "msg_id", None)
+        and (need_id is None or inbound.need_id == need_id)
+        and all(row.msg_id != inbound.msg_id for row in rows)
+    ):
+        return [*rows, inbound]
+    return list(rows)
+
+
+# Directory lookups (city.find) were uncached and untimed: every partner search re-queried the
+# directory and a slow directory held the turn. The directory barely changes during a wave, so
+# a lookup is reused for _FIND_TTL seconds and capped at _FIND_CAP seconds (then: no peers, the
+# known-facility list still applies).
+_FIND_TTL = 120.0
+_FIND_CAP = 5.0
+_FIND_CACHE: dict = {}
+
+
+async def _find(city: City, query: str) -> list:
+    key = (_history_source(city), query)
+    hit = _FIND_CACHE.get(key)
+    if hit is not None and time.monotonic() - hit[0] < _FIND_TTL:
+        return list(hit[1])
+    try:
+        peers = await asyncio.wait_for(city.find(query), _FIND_CAP)
+    except asyncio.TimeoutError:
+        return [] if hit is None else list(hit[1])
+    _FIND_CACHE[key] = (time.monotonic(), list(peers))
+    return list(peers)
+
+
+async def _history(city: City, need_id: str | None) -> list[Message]:
+    """The case history, read through the shared load control (see _HISTORY_GATE)."""
+
+    _history_watch(city)
+    source = _history_source(city)
+    key = (source, need_id)
+    epoch = _HISTORY_EPOCH.get(source, 0)
+    hit = _HISTORY_CACHE.get(key)
+    if hit is not None and hit[1] == epoch and time.monotonic() - hit[0] < 5 * _PULL_PAUSE:
+        _HISTORY_STATS["reused"] += 1
+        return _with_inbound(city, need_id, hit[2])
+    flight = _HISTORY_FLIGHT.get(key)
+    if flight is not None and flight[0] == epoch and not flight[1].done():
+        _HISTORY_STATS["shared"] += 1
+        return _with_inbound(city, need_id, await asyncio.shield(flight[1]))
+
+    async def download() -> list[Message]:
+        async with _history_gate():
+            _HISTORY_STATS["downloads"] += 1
+            return await city.history(need_id=need_id)
+
+    task = asyncio.ensure_future(download())
+    _HISTORY_FLIGHT[key] = (epoch, task)
+    try:
+        rows = await asyncio.shield(task)
+    finally:
+        if _HISTORY_FLIGHT.get(key, (None, None))[1] is task:
+            del _HISTORY_FLIGHT[key]
+    if _HISTORY_EPOCH.get(source, 0) == epoch:
+        _HISTORY_CACHE[key] = (time.monotonic(), epoch, rows)
+        if len(_HISTORY_CACHE) > 2000:
+            for old in sorted(_HISTORY_CACHE, key=lambda k: _HISTORY_CACHE[k][0])[:1000]:
+                del _HISTORY_CACHE[old]
+    return _with_inbound(city, need_id, rows)
+
+
 def _age(message: Message) -> float | None:
     """Real seconds since the message was sent (None when the stamp is missing or odd)."""
 
@@ -239,7 +373,7 @@ async def main(need: Need, city: City) -> None:
         )):
             raise OutOfScope()
     try:
-        case = await city.history(need_id=message.need_id)
+        case = await _history(city, message.need_id)
     except CapError:
         case = [message]  # the relay hiccupped: work from the message itself, never crash
     await handle(role, city, message, case)
@@ -914,7 +1048,7 @@ async def _never_silent(role: str, city: City, message: Message, chat: list[Mess
 
     agent = city.agent_id
     try:
-        fresh = await city.history(need_id=message.need_id)
+        fresh = await _history(city, message.need_id)
     except CapError:
         fresh = chat
     if _answered(fresh, agent, message):
@@ -1160,7 +1294,7 @@ async def _until(
     fresh = chat
     for pause in _poll_pauses():
         try:
-            fresh = await city.history(need_id=need_id)
+            fresh = await _history(city, need_id)
         except CapError:
             fresh = chat
         if ready(fresh):
@@ -1204,7 +1338,7 @@ async def _await_line(
     fresh = chat
     for pause in _poll_pauses():
         try:
-            fresh = await city.history(need_id=need_id)
+            fresh = await _history(city, need_id)
         except CapError:
             fresh = chat
         hit = _latest(fresh, head, token)
@@ -1949,7 +2083,7 @@ async def _first_slot(
     while time.monotonic() < deadline:
         await asyncio.sleep(0.1)
         try:
-            rows = await city.history(need_id=need_id)
+            rows = await _history(city, need_id)
         except CapError:
             continue
         if _merged_slots(rows, procedure) and _case_now(rows, agent) is not None:
@@ -3120,7 +3254,7 @@ async def _advance(
             if waited or message.sender.startswith("agent:"):
                 # Another turn of this need may have written while we waited: read it again.
                 try:
-                    chat = await city.history(need_id=message.need_id)
+                    chat = await _history(city, message.need_id)
                 except CapError:
                     pass
             await _advance_alone(city, message, chat, key, fixed=fixed, replacing=replacing)
@@ -3403,7 +3537,7 @@ async def _advance_alone(
         # Several turns of one case (a Ledger answer, a second replica) can reach this point
         # together: read the case again and send nothing if another turn already offered.
         try:
-            latest = await city.history(need_id=message.need_id)
+            latest = await _history(city, message.need_id)
         except CapError:
             latest = chat
         fresh_batch = _latest_batch(latest, agent, citizen)
@@ -3663,7 +3797,7 @@ async def _slow_ledger(
     while time.monotonic() < deadline:
         await asyncio.sleep(_SLOW_POLL)
         try:
-            rows = await city.history(need_id=message.need_id)
+            rows = await _history(city, message.need_id)
         except CapError:
             continue
         if ready(rows):
@@ -3916,7 +4050,7 @@ async def _go_partner(
     partners = []
     if service:
         try:
-            peers = await city.find(f"{service} {procedure}")
+            peers = await _find(city, f"{service} {procedure}")
         except CapError:
             peers = []
         family = service.split(".", 1)[0]
@@ -4119,7 +4253,7 @@ async def _ask_again(city: City, chat: list[Message], procedure: str, priority: 
     first = [_lang_partner(chat, procedure)] if _lang_partner(chat, procedure) else []
     rest = [agent_id for agent_id, svc in _KNOWN_FACILITIES.items() if svc == service]
     try:
-        peers = await city.find(f"{service} {procedure}")
+        peers = await _find(city, f"{service} {procedure}")
     except CapError:
         peers = []
     family = service.split(".", 1)[0]
@@ -4242,7 +4376,7 @@ async def _cross_turn(city: City, message: Message, chat: list[Message], citizen
     if pause > 0 and patient:
         await asyncio.sleep(pause)
         try:
-            chat = await city.history(need_id=message.need_id)
+            chat = await _history(city, message.need_id)
         except CapError:
             pass
     # Partners answer in 5-35 s (journeys 510002/530002/940006/000172 got a waiting list after
@@ -4262,7 +4396,7 @@ async def _cross_turn(city: City, message: Message, chat: list[Message], citizen
     ):
         await asyncio.sleep(_PARTNER_POLL)
         try:
-            chat = await city.history(need_id=message.need_id)
+            chat = await _history(city, message.need_id)
         except CapError:
             pass
     forwarded = _offered(chat, agent) | _declined(chat, agent)
@@ -4285,7 +4419,7 @@ async def _cross_turn(city: City, message: Message, chat: list[Message], citizen
             while time.monotonic() - again < _PARTNER_WAIT:
                 await asyncio.sleep(_PARTNER_POLL)
                 try:
-                    chat = await city.history(need_id=message.need_id)
+                    chat = await _history(city, message.need_id)
                 except CapError:
                     pass
                 if _fitting_partner_offers(chat, agent, priority) or not _partners_pending(chat, agent):
@@ -4494,7 +4628,7 @@ async def _facility_down(
             f"cancel offer_id={offer_id} reason=facility_unavailable " + _desk_line("down", chat),
         )
     try:
-        chat = await city.history(need_id=message.need_id)
+        chat = await _history(city, message.need_id)
     except CapError:
         pass
     await _advance(city, message, chat, fixed=None, replacing=True)
@@ -4846,7 +4980,7 @@ async def _partner_cancel(
             # The other partner slots in front of the citizen are still good: show them now;
             # with none left, the cross-ASST turn looks for fresh ones or the waiting list.
             try:
-                chat = await city.history(need_id=message.need_id)
+                chat = await _history(city, message.need_id)
             except CapError:
                 pass
             closed = _declined(chat, city.agent_id) | _we_cancelled(chat, city.agent_id, citizen)
@@ -5214,7 +5348,7 @@ async def _partner_request(
                     await asyncio.sleep(poll)
                     poll = min(poll * 1.5, max(poll, 5 * _HOLD_POLL * (_PULL_PAUSE / 0.1)))
                     try:
-                        chat = await city.history(need_id=message.need_id)
+                        chat = await _history(city, message.need_id)
                     except CapError:
                         pass
             finally:
@@ -5535,7 +5669,7 @@ async def _patient_loop(
         # polling every 2 s loaded the platform). 2 s, 3 s, 4.5 s ... up to 10 s.
         poll = min(poll * 1.5, max(poll, 5 * _HOLD_POLL * (_PULL_PAUSE / 0.1)))
         try:
-            fresh = await city.history(need_id=need_id)
+            fresh = await _history(city, need_id)
         except CapError:
             continue
         hit = _latest(fresh, head, token)
@@ -5781,7 +5915,7 @@ async def _on_checkin(city: City, message: Message, chat: list[Message], *, repo
         _LOG.warning("care.checkin.no_answer booking_id=%s", booking_id)
         fresh = chat
         try:
-            fresh = await city.history(need_id=message.need_id)
+            fresh = await _history(city, message.need_id)
         except CapError:
             pass
         await _on_checked_in(city, _note(message, f"checked_in {token}"), fresh, reports=reports)
@@ -5906,13 +6040,13 @@ async def _report_deadline(city: City, message: Message, citizen: str, booking_i
     while time.monotonic() - start < _REPORT_WAIT:
         await asyncio.sleep(_REPORT_POLL)
         try:
-            chat = await city.history(need_id=message.need_id)
+            chat = await _history(city, message.need_id)
         except CapError:
             continue
         if _we(chat, agent, token, to=LEDGER, word="report") or f"report:{booking_id}" in _ONCE:
             return  # the citizen's answer turn files it
     try:
-        chat = await city.history(need_id=message.need_id)
+        chat = await _history(city, message.need_id)
     except CapError:
         return
     if _we(chat, agent, token, to=LEDGER, word="report"):
