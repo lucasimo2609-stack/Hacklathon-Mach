@@ -58,6 +58,14 @@ _RED_FLAGS = (
     "chest pain",
 )
 _DEADLINE_DAYS = {"B": 2, "D": 5}
+# The citizen counts the window from the need's birth in plain hours (B 48 h, D 120 h), not from
+# "now": the city delivers in minutes (= agenda hours), so a window from "now" drifted later every
+# turn and citizens cancelled our offers with reason=deadline (21 Nov, wave W01QQQ). The birth is
+# before our first agenda reading (GP -> citizen -> us), hence the margin.
+_BORN_MARGIN = timedelta(hours=4)
+_CASE_FIRST: contextvars.ContextVar[datetime | None] = contextvars.ContextVar("case_first", default=None)
+_CASE_CAP: contextvars.ContextVar[datetime | None] = contextvars.ContextVar("case_cap", default=None)
+_LATE_REASONS = {"deadline", "too_late_for_priority", "too_far", "late", "outside_window"}
 
 
 def _agenda_plus(now: datetime, days: int) -> datetime:
@@ -73,6 +81,73 @@ def _agenda_plus(now: datetime, days: int) -> datetime:
         if when.weekday() < 5:
             left -= 1
     return when
+
+
+def _horizon(now: datetime, priority: str) -> datetime:
+    """End of the priority window for this case: the working-day window from now, capped by
+    the window from the need's birth (plain hours) and by any slot the citizen already turned
+    down as too late."""
+
+    days = _DEADLINE_DAYS.get(priority or "", 14)
+    horizon = _agenda_plus(now, days)
+    first = _CASE_FIRST.get()
+    caps: list[datetime] = []
+    if first is not None and priority in _DEADLINE_DAYS:
+        cap = first + timedelta(days=days) - _BORN_MARGIN
+        if cap.weekday() >= 5:  # no agenda at the weekend: the working-day rule decides
+            cap = _agenda_plus(first, days) - _BORN_MARGIN
+        caps.append(cap)
+    late = _CASE_CAP.get()
+    if late is not None:
+        caps.append(late)
+    for cap in caps:
+        try:
+            horizon = min(horizon, cap)
+        except TypeError:  # naive vs aware
+            try:
+                horizon = min(horizon, cap.replace(tzinfo=horizon.tzinfo))
+            except TypeError:
+                pass
+    return horizon
+
+
+def _first_agenda(chat: list[Message]) -> datetime | None:
+    """The case's first agenda reading: the closest instant we know to the need's birth."""
+
+    for index, row in enumerate(chat):
+        if row.sender == LEDGER and first_word(row.text) == "agenda":
+            found = _ledger(chat[: index + 1], "agenda")
+            when = _when("" if found is None else found.get("agenda_now", ""))
+            if when is not None:
+                return when
+    return None
+
+
+def _late_cap(chat: list[Message], agent: str) -> datetime | None:
+    """The earliest slot the citizen cancelled as past the deadline: never offer at or after it."""
+
+    cap: datetime | None = None
+    for row in chat:
+        if not row.sender.startswith("citizen:") or "cancel" not in words(row.text):
+            continue
+        fields = fields_of(row.text)
+        if fields.get("reason", "").lower() not in _LATE_REASONS:
+            continue
+        offer = _our_offer(chat, agent, fields.get("offer_id", ""))
+        at = _when(offer.get("agenda_date") or offer.get("at") or "")
+        if at is None:
+            stamp = re.search(r"-(\d{8})-(\d{4})$", fields.get("offer_id", ""))
+            if stamp:
+                at = _when(f"{stamp.group(1)[:4]}-{stamp.group(1)[4:6]}-{stamp.group(1)[6:]}T"
+                           f"{stamp.group(2)[:2]}:{stamp.group(2)[2:]}")
+        if at is None:
+            continue
+        try:
+            if cap is None or at < cap:
+                cap = at
+        except TypeError:
+            continue
+    return cap
 _OFFERS = 5  # most offers in the one message the citizen chooses from
 _MIN_OFFERS = 3  # relaxed (other gender) slots only fill up to this many
 _RX = re.compile(r"^prescription_number-[A-Z0-9-]{4,40}$")
@@ -698,7 +773,13 @@ def _notice_lang(chat: list[Message]) -> str:
 
 async def handle(role: str, city: City, message: Message, chat: list[Message]) -> None:
     token = _TURN_TO.set(set())
+    first_token = cap_token = None
     try:
+        try:
+            first_token = _CASE_FIRST.set(_first_agenda(chat))
+            cap_token = _CASE_CAP.set(_late_cap(chat, city.agent_id))
+        except Exception:  # noqa: BLE001 - the window cap is a refinement, never fatal
+            pass
         await _handle(role, city, message, chat)
         if message.sender.startswith("citizen:") and message.sender not in _TURN_TO.get():
             await _never_silent(role, city, message, chat)
@@ -708,6 +789,10 @@ async def handle(role: str, city: City, message: Message, chat: list[Message]) -
         await _safety_net(city, message, chat, error)
     finally:
         _TURN_TO.reset(token)
+        if first_token is not None:
+            _CASE_FIRST.reset(first_token)
+        if cap_token is not None:
+            _CASE_CAP.reset(cap_token)
 
 
 # Who this turn wrote to: the "never silent" check below reads it after the role's handler.
@@ -1274,7 +1359,7 @@ def fitting(
     elif priority == "P":
         horizon = None
     else:
-        horizon = _agenda_plus(now, _DEADLINE_DAYS.get(priority or "", 14))
+        horizon = _horizon(now, priority or "")
     earliest = now + (_LEAD if priority == "U" else _LEAD_PLANNED)
     chosen: list[tuple[datetime, dict[str, str]]] = []
     for line in lines:
@@ -2163,7 +2248,7 @@ def _need_more_pages(text: str, now: datetime, priority: str | None) -> bool:
     if priority == "U":
         horizon = now.replace(hour=23, minute=59, second=59, microsecond=0)
     elif priority in _DEADLINE_DAYS:
-        horizon = _agenda_plus(now, _DEADLINE_DAYS[priority])
+        horizon = _horizon(now, priority)
     else:
         return len(times) < _OFFERS * 2  # planned visit: enough choice already in hand
     try:
@@ -3636,11 +3721,14 @@ def _fits_partner(
     if priority == "U":
         return at.date() == now.date()
     if priority in _DEADLINE_DAYS:
-        return at < _agenda_plus(now, _DEADLINE_DAYS[priority])
+        try:
+            return at < _horizon(now, priority)
+        except TypeError:
+            return at < _agenda_plus(now, _DEADLINE_DAYS[priority])
     return True
 
 
-_MAX_PARTNERS = 12  # per round: 25 answers per case flooded our mailbox (level 6: time matters)
+_MAX_PARTNERS = 5  # per round (MACH 1.4): 12 and 25 hit the rate limit and flooded our mailbox
 
 
 async def _go_partner(
