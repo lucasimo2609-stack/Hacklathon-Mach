@@ -52,6 +52,15 @@ async def main(role):
     check("Ledger 3 s late: no blind no_availability", "no_availability" not in joined, joined)
     led = [t.split()[0] for to, t in c.out if to == LEDGER]
     check("agenda and world asked (in parallel with the ack)", "agenda" in led and "world" in led, str(led))
+    # Our own booking centre (Ledger slow): a 20-min-old copy answers at once, no Ledger wait.
+    reset()
+    A._WORLD_SEEN["VIS-FIS"] = (A.time.monotonic() - 1200, "slots page=1/1\n" + line(7, "2026-11-04T10:30"))
+    A._AGENDA_SEEN = (A.time.monotonic(), datetime(2026, 11, 3, 8, 0, tzinfo=A.timezone.utc))
+    c = C([], delay=60.0)
+    m = c.add("agent:cdc7x6m21nj6", ME, "need.request source=own_asst service_type=hospital.physiatry procedure=VIS-FIS priority=B lang=it request_id=N-own")
+    t0 = A.time.monotonic(); await A.handle(role, c, m, await c.history()); took = A.time.monotonic() - t0
+    sent = " // ".join(t for to, t in c.out if to == "agent:cdc7x6m21nj6")
+    check("own booking, 20-min-old copy: offer at once", "offer offer_id=of-P7" in sent and took < 3, f"{took:.1f}s {sent}")
     # Learned lead: an offer 6 h ahead was called past -> lead >= 7 h for planned priorities.
     reset()
     now = datetime(2026, 11, 3, 8, 0, tzinfo=A.timezone.utc) if hasattr(A, "timezone") else datetime(2026, 11, 3, 8, 0)
