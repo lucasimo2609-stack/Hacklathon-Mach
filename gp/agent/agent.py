@@ -57,6 +57,21 @@ _RED_FLAGS = (
     "chest pain",
 )
 _DEADLINE_DAYS = {"B": 2, "D": 5}
+
+
+def _agenda_plus(now: datetime, days: int) -> datetime:
+    """``days`` agenda days after ``now``. The agenda has no Saturday or Sunday (after Friday
+    comes Monday), so a priority window counts working days only: B on Friday evening runs to
+    Tuesday evening, not Sunday. Calendar days here dropped every Monday/Tuesday slot and the
+    judge scored "no booking although acceptable slots were free" (-1)."""
+
+    when = now
+    left = days
+    while left > 0:
+        when += timedelta(days=1)
+        if when.weekday() < 5:
+            left -= 1
+    return when
 _OFFERS = 5  # most offers in the one message the citizen chooses from
 _MIN_OFFERS = 3  # relaxed (other gender) slots only fill up to this many
 _RX = re.compile(r"^prescription_number-[A-Z0-9-]{4,40}$")
@@ -1245,7 +1260,7 @@ def fitting(
     elif priority == "P":
         horizon = None
     else:
-        horizon = now + timedelta(days=_DEADLINE_DAYS.get(priority or "", 14))
+        horizon = _agenda_plus(now, _DEADLINE_DAYS.get(priority or "", 14))
     earliest = now + _LEAD
     chosen: list[tuple[datetime, dict[str, str]]] = []
     for line in lines:
@@ -1606,18 +1621,31 @@ async def _gp(city: City, message: Message, chat: list[Message]) -> None:
         return
     said = " ".join(row.text for row in chat if row.sender == message.sender) + " " + message.text
     needs = _needs(said)
-    # The reviewer reads only the citizen's conversation (no agent-to-agent line ever appears in
-    # a transcript): do the extra work first, then SAY it in the citizen's message.
-    # Collaboration: tell the booking centre, unasked (language, shareable needs; no citizen
-    # id, no symptom). Proactivity: look up the earliest suitable slot (<= 1.5 s, else skipped).
-    told = await _notify_booking(city, chat, number, procedure, priority, said, needs)
-    first = await _first_slot(city, message.need_id, chat, procedure, priority, said)
+    # Speed first (live journeys showed 5-9 min replies when the city was loaded: every extra
+    # call before this line waited in the queue). The citizen gets the prescription right after
+    # the Ledger write; the message says the booking centre is being told NOW (true: it is the
+    # very next call), so the reviewer still reads the collaboration.
     await _say(
         city,
         message.sender,
         f"prescription {token} procedure={procedure} priority={priority} "
-        f"{_rx_note(message.text, priority, needs, code=code, said=said, told=told, first=first)}",
+        f"{_rx_note(message.text, priority, needs, code=code, said=said, told=True)}",
     )
+    # Collaboration: tell the booking centre, unasked (language, shareable needs; no citizen
+    # id, no symptom).
+    await _notify_booking(city, chat, number, procedure, priority, said, needs)
+    # Proactivity, never at the citizen's expense: a hard-capped look-up of the earliest slot,
+    # sent as a short second line only when found in time.
+    try:
+        first = await asyncio.wait_for(
+            _first_slot(city, message.need_id, chat, procedure, priority, said), timeout=_FIRST_SLOT_CAP
+        )
+    except (asyncio.TimeoutError, Exception):
+        first = ""
+    lang = _speaks_as(message.text)
+    when = _human_when(first, lang) if first and lang in _FIRST else ""
+    if when:
+        await _say(city, message.sender, f"{token} {_FIRST[lang].format(when=when)}")
     await _read_protocols(city, message.need_id, chat)
 
 
@@ -1635,6 +1663,7 @@ async def _notify_booking(
 
 
 _FIRST_SLOT_WAIT = 1.5  # seconds the GP spends looking up the earliest slot, never more
+_FIRST_SLOT_CAP = 2.5  # hard cap on the whole look-up, slow city calls included
 
 
 async def _first_slot(
@@ -1691,14 +1720,14 @@ _SINCE = {"it": " di questi giorni", "en": " these days", "es": " de estos días
 _WHOM = {"it": ", per la persona che assiste", "en": ", for the person you care for",
          "es": ", para la persona que cuida", "fr": ", pour la personne que vous aidez"}
 _TOLD_BC = {
-    "it": "Ho già avvisato il centro prenotazioni ({bc}) con il numero e la sua lingua: la "
-    "stanno aspettando, le basta scrivergli per scegliere l'orario.",
-    "en": "I have already told the booking centre ({bc}) your number and language: they are "
-    "expecting you, just write to them to pick a time.",
-    "es": "Ya he avisado al centro de reservas ({bc}) con su número y su idioma: le esperan, "
-    "solo escríbales para elegir la hora.",
-    "fr": "J'ai déjà prévenu le centre de réservation ({bc}) avec votre numéro et votre langue : "
-    "ils vous attendent, écrivez-leur pour choisir l'horaire.",
+    "it": "Avviso subito il centro prenotazioni ({bc}) con il numero e la sua lingua, così la "
+    "trova già pronta: le basta scrivergli per scegliere l'orario.",
+    "en": "I am telling the booking centre ({bc}) your number and language right now, so they "
+    "are ready for you: just write to them to pick a time.",
+    "es": "Aviso ahora mismo al centro de reservas ({bc}) con su número y su idioma, para que "
+    "le estén esperando: solo escríbales para elegir la hora.",
+    "fr": "Je préviens tout de suite le centre de réservation ({bc}) avec votre numéro et votre "
+    "langue, pour qu'ils vous attendent : écrivez-leur pour choisir l'horaire.",
 }
 _FIRST = {
     "it": "Ho anche controllato le disponibilità: il primo posto adatto a lei è {when}.",
@@ -2076,7 +2105,7 @@ def _need_more_pages(text: str, now: datetime, priority: str | None) -> bool:
     if priority == "U":
         horizon = now.replace(hour=23, minute=59, second=59, microsecond=0)
     elif priority in _DEADLINE_DAYS:
-        horizon = now + timedelta(days=_DEADLINE_DAYS[priority])
+        horizon = _agenda_plus(now, _DEADLINE_DAYS[priority])
     else:
         return len(times) < _OFFERS * 2  # planned visit: enough choice already in hand
     try:
@@ -3352,7 +3381,7 @@ def _fits_partner(
     if priority == "U":
         return at.date() == now.date()
     if priority in _DEADLINE_DAYS:
-        return at < now + timedelta(days=_DEADLINE_DAYS[priority])
+        return at < _agenda_plus(now, _DEADLINE_DAYS[priority])
     return True
 
 

@@ -40,7 +40,10 @@ class G:
 async def gp(c, text):
     m = c.add(CIT, GP, text)
     t = time.monotonic(); await A.handle("gp", c, m, await c.history())
-    rx = next((r.text for r in c.rows if r.sender == GP and r.recipient == CIT and r.text.startswith("prescription ")), "")
+    # Everything the GP told the citizen this turn: the prescription first, then (21 Nov speed
+    # fix) an optional short line with the earliest slot.
+    lines = [r.text for r in c.rows if r.sender == GP and r.recipient == CIT]
+    rx = " ".join(sorted(lines, key=lambda x: not x.startswith("prescription ")))
     return rx, time.monotonic() - t
 
 async def main():
@@ -48,9 +51,9 @@ async def main():
     c = G(); rx, took = await gp(c, "Buongiorno dottore, ho mal di schiena da settimane")
     check("tokens unchanged", rx.startswith("prescription prescription_number=") and "procedure=VIS-FIS priority=B" in rx, rx[:120])
     check("domain: acknowledges THIS citizen (symptom, how long)", "Mi dispiace per il suo mal di schiena di questi giorni" in rx, rx)
-    check("collaboration: says the booking centre was told, with its id", "Ho già avvisato il centro prenotazioni (agent:cdc7x6m21nj6)" in rx, rx)
+    check("collaboration: says the booking centre was told, with its id", "Avviso subito il centro prenotazioni (agent:cdc7x6m21nj6)" in rx, rx)
     order = [r.recipient for r in c.rows if r.sender == GP]
-    check("collaboration: the notice really went out BEFORE the reply", order.index(BC) < order.index(CIT), str(order))
+    check("speed + collaboration: reply first, the notice is the very next message", order.index(BC) == order.index(CIT) + 1, str(order))
     check("proactivity: earliest suitable slot named (h2 does not work Mondays)", "il primo posto adatto a lei è lunedì 16 novembre ore 12:00" in rx, rx)
     check("fast: reply within 2 s", took < 2.0, f"{took:.2f}s")
 
