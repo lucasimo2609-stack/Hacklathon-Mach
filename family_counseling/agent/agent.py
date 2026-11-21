@@ -1696,6 +1696,29 @@ async def _fetch_pages(
     return await _until(city, need_id, chat, lambda rows: wanted <= _pages_seen(rows, procedure))
 
 
+def _need_more_pages(text: str, now: datetime, priority: str | None) -> bool:
+    """The Ledger pages slots by date from today (from=… until=… page=n/N, 10 a page). Once the
+    pages we hold reach past the priority's deadline, later pages cannot fit: choose now
+    (000172 waited ~11 s for 8 pages it did not need)."""
+
+    times = [
+        when for when in (_when(fields_of(line).get("at", "")) for line in text.splitlines()
+                          if "slot_id=" in line) if when is not None
+    ]
+    if not times:
+        return True
+    if priority == "U":
+        horizon = now.replace(hour=23, minute=59, second=59, microsecond=0)
+    elif priority in _DEADLINE_DAYS:
+        horizon = now + timedelta(days=_DEADLINE_DAYS[priority])
+    else:
+        return len(times) < _OFFERS * 2  # planned visit: enough choice already in hand
+    try:
+        return max(times) < horizon
+    except TypeError:
+        return True
+
+
 def _merged_slots(chat: list[Message], procedure: str) -> str | None:
     """Every page of the slot list for this procedure, as one list (page 1's head line)."""
 
@@ -2475,7 +2498,9 @@ async def _advance_alone(
     # sit on later pages: an English citizen on 16 Nov was told "no slot in our ASST" with
     # h1 free on Monday and Tuesday. Ask every page at once, wait once, choose from all.
     if _page(world)[1] > 1:
-        chat = await _fetch_pages(city, message.need_id, chat, agent, procedure, world)
+        merged = _merged_slots(chat, procedure) or world
+        if _need_more_pages(merged, now, priority):
+            chat = await _fetch_pages(city, message.need_id, chat, agent, procedure, world)
         world = _merged_slots(chat, procedure) or world
     # A cancel drops every offer the citizen was holding, so the ones still free are sent again,
     # once per cancel: a second turn for the same cancel or refusal does not repeat them.
@@ -2670,7 +2695,7 @@ async def _offers_again(city: City, chat: list[Message], message: Message) -> No
     for row in chat:
         if row.sender == agent and row.recipient == message.sender and _offers_in(row.text):
             latest = row.text
-    declined = _declined(chat, agent)
+    declined = _declined(chat, agent) | _we_cancelled(chat, agent, message.sender)
     offers = [o for o in _offers_in(latest) if o.get("slot_id") not in declined]
     if not offers:
         return
@@ -3021,6 +3046,36 @@ def _consent_answer(row: Message) -> str:
 
 
 _PARTNER_SETTLE = 2.5  # seconds after the citizen's consent to gather partner answers
+_PARTNER_WAIT = 10.0  # at most this long for silent partners before the waiting list
+_PARTNER_POLL = 0.5
+
+
+def _partners_pending(chat: list[Message], agent: str) -> int:
+    """Partners we asked (need.request) that have not answered yet in this case."""
+
+    asked = {row.recipient for row in chat if row.sender == agent and first_word(row.text) == "need.request"}
+    answered = {row.sender for row in chat if row.sender in asked}
+    return len(asked - answered)
+
+
+def _fitting_partner_offers(chat: list[Message], agent: str, priority: str | None) -> bool:
+    gone = _offered(chat, agent) | _declined(chat, agent)
+    return any(
+        offer.get("slot_id") not in gone and _fits_partner(offer, chat, priority, agent)
+        for _, offer in _partner_offers(chat, agent)
+    )
+
+
+def _we_cancelled(chat: list[Message], agent: str, citizen: str) -> set[str]:
+    """Slots of our offers that WE cancelled to the citizen (a partner refused the hold)."""
+
+    slots: set[str] = set()
+    for row in chat:
+        if row.sender == agent and row.recipient == citizen and first_word(row.text) == "cancel":
+            offer = _our_offer(chat, agent, fields_of(row.text).get("offer_id", ""))
+            if offer.get("slot_id"):
+                slots.add(offer["slot_id"])
+    return slots
 _CROSS_SEEN: dict[str, float] = {}
 
 
@@ -3057,7 +3112,7 @@ async def _cross_turn(city: City, message: Message, chat: list[Message], citizen
     # Offers already in front of the citizen and not all declined: their choice is open, so a
     # later partner answer adds nothing (journeys 000119/690005 got 3-4 offer messages).
     batch = _latest_batch(chat, agent, citizen)
-    declined = _declined(chat, agent)
+    declined = _declined(chat, agent) | _we_cancelled(chat, agent, citizen)
     waiting = any(
         row.sender == agent and row.recipient == citizen and "waiting_list=true" in row.text
         and not any(fields_of(r.text).get("offer_id") == fields_of(row.text).get("offer_id")
@@ -3081,6 +3136,18 @@ async def _cross_turn(city: City, message: Message, chat: list[Message], citizen
             chat = await city.history(need_id=message.need_id)
         except CapError:
             pass
+    # Partners answer in 5-35 s (journeys 510002/530002/940006/000172 got a waiting list after
+    # 3-5 s, then partner slots arrived): keep waiting while a partner we asked is silent.
+    while (
+        _partners_pending(chat, agent)
+        and not _fitting_partner_offers(chat, agent, priority)
+        and time.monotonic() - start < _PARTNER_WAIT
+    ):
+        await asyncio.sleep(_PARTNER_POLL)
+        try:
+            chat = await city.history(need_id=message.need_id)
+        except CapError:
+            pass
     forwarded = _offered(chat, agent) | _declined(chat, agent)
     fresh = []
     seen_slots: set[str] = set()
@@ -3093,7 +3160,17 @@ async def _cross_turn(city: City, message: Message, chat: list[Message], citizen
             fresh.append((sender, offer))
     fresh = _rank_partner_offers(fresh, _lang(chat))[:6]
     if not fresh:
-        if not forwarded:
+        closed = _declined(chat, agent) | _we_cancelled(chat, agent, citizen)
+        still = [o for o in batch if o["slot_id"] not in closed]
+        if still:
+            # A partner refused one hold (940006): the other slots are still good, show them
+            # (to the citizen: this turn may be the partner's message).
+            as_citizen = Message(
+                type=message.type, sender=citizen, msg_id=message.msg_id, need_id=message.need_id,
+                conversation_id=message.conversation_id, body={"text": ""}, recipient=agent,
+            )
+            await _offers_again(city, chat, as_citizen)
+        elif not forwarded or all(o["slot_id"] in closed for o in batch):
             await _waiting_list(city, chat, citizen, message.need_id)
         return
     number = _number(chat)
@@ -3343,6 +3420,25 @@ async def _partner_cancel(
         and not _we(chat, city.agent_id, f"offer_id={offer_id}", to=citizen, word="cancel")
     ):
         await _say(city, citizen, f"cancel offer_id={offer_id} reason=facility_cancelled")
+        held = _our_offer(chat, city.agent_id, offer_id)
+        if held.get("via"):
+            # A partner refused the hold (940006: the citizen was left with a bare cancel).
+            # The other partner slots in front of the citizen are still good: show them now;
+            # with none left, the cross-ASST turn looks for fresh ones or the waiting list.
+            try:
+                chat = await city.history(need_id=message.need_id)
+            except CapError:
+                pass
+            closed = _declined(chat, city.agent_id) | _we_cancelled(chat, city.agent_id, citizen)
+            batch = _latest_batch(chat, city.agent_id, citizen)
+            if any(o["slot_id"] not in closed for o in batch):
+                as_citizen = Message(
+                    type=message.type, sender=citizen, msg_id=message.msg_id,
+                    need_id=message.need_id, conversation_id=message.conversation_id,
+                    body={"text": ""}, recipient=city.agent_id,
+                )
+                await _offers_again(city, chat, as_citizen)
+                return
     await _advance(city, message, chat, fixed=fixed, replacing=True)
 
 
