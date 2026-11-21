@@ -58,6 +58,14 @@ _RED_FLAGS = (
     "chest pain",
 )
 _DEADLINE_DAYS = {"B": 2, "D": 5}
+# The citizen counts the window from the need's birth in plain hours (B 48 h, D 120 h), not from
+# "now": the city delivers in minutes (= agenda hours), so a window from "now" drifted later every
+# turn and citizens cancelled our offers with reason=deadline (21 Nov, wave W01QQQ). The birth is
+# before our first agenda reading (GP -> citizen -> us), hence the margin.
+_BORN_MARGIN = timedelta(hours=4)
+_CASE_FIRST: contextvars.ContextVar[datetime | None] = contextvars.ContextVar("case_first", default=None)
+_CASE_CAP: contextvars.ContextVar[datetime | None] = contextvars.ContextVar("case_cap", default=None)
+_LATE_REASONS = {"deadline", "too_late_for_priority", "too_far", "late", "outside_window"}
 
 
 def _agenda_plus(now: datetime, days: int) -> datetime:
@@ -73,6 +81,73 @@ def _agenda_plus(now: datetime, days: int) -> datetime:
         if when.weekday() < 5:
             left -= 1
     return when
+
+
+def _horizon(now: datetime, priority: str) -> datetime:
+    """End of the priority window for this case: the working-day window from now, capped by
+    the window from the need's birth (plain hours) and by any slot the citizen already turned
+    down as too late."""
+
+    days = _DEADLINE_DAYS.get(priority or "", 14)
+    horizon = _agenda_plus(now, days)
+    first = _CASE_FIRST.get()
+    caps: list[datetime] = []
+    if first is not None and priority in _DEADLINE_DAYS:
+        cap = first + timedelta(days=days) - _BORN_MARGIN
+        if cap.weekday() >= 5:  # no agenda at the weekend: the working-day rule decides
+            cap = _agenda_plus(first, days) - _BORN_MARGIN
+        caps.append(cap)
+    late = _CASE_CAP.get()
+    if late is not None:
+        caps.append(late)
+    for cap in caps:
+        try:
+            horizon = min(horizon, cap)
+        except TypeError:  # naive vs aware
+            try:
+                horizon = min(horizon, cap.replace(tzinfo=horizon.tzinfo))
+            except TypeError:
+                pass
+    return horizon
+
+
+def _first_agenda(chat: list[Message]) -> datetime | None:
+    """The case's first agenda reading: the closest instant we know to the need's birth."""
+
+    for index, row in enumerate(chat):
+        if row.sender == LEDGER and first_word(row.text) == "agenda":
+            found = _ledger(chat[: index + 1], "agenda")
+            when = _when("" if found is None else found.get("agenda_now", ""))
+            if when is not None:
+                return when
+    return None
+
+
+def _late_cap(chat: list[Message], agent: str) -> datetime | None:
+    """The earliest slot the citizen cancelled as past the deadline: never offer at or after it."""
+
+    cap: datetime | None = None
+    for row in chat:
+        if not row.sender.startswith("citizen:") or "cancel" not in words(row.text):
+            continue
+        fields = fields_of(row.text)
+        if fields.get("reason", "").lower() not in _LATE_REASONS:
+            continue
+        offer = _our_offer(chat, agent, fields.get("offer_id", ""))
+        at = _when(offer.get("agenda_date") or offer.get("at") or "")
+        if at is None:
+            stamp = re.search(r"-(\d{8})-(\d{4})$", fields.get("offer_id", ""))
+            if stamp:
+                at = _when(f"{stamp.group(1)[:4]}-{stamp.group(1)[4:6]}-{stamp.group(1)[6:]}T"
+                           f"{stamp.group(2)[:2]}:{stamp.group(2)[2:]}")
+        if at is None:
+            continue
+        try:
+            if cap is None or at < cap:
+                cap = at
+        except TypeError:
+            continue
+    return cap
 _OFFERS = 5  # most offers in the one message the citizen chooses from
 _MIN_OFFERS = 3  # relaxed (other gender) slots only fill up to this many
 _RX = re.compile(r"^prescription_number-[A-Z0-9-]{4,40}$")
@@ -81,6 +156,13 @@ _LOG = logging.getLogger("care")
 # the case history and never opens a turn. Wait briefly and read it back from history.
 _PULL_TRIES = 60
 _PULL_PAUSE = 0.1  # same 6 s budget, but a Ledger answer is seen within 0.1 s
+# Facility hold/commit with a slow Ledger (21 Nov, wave W01QQQ): "held" came minutes after the
+# hold, our 6 s wait ended the turn, the late answer did not open a turn, and the booking centre
+# told the citizen "la ricevuta arriva tra pochi secondi" that never came (25 confirms on our
+# own facilities). Keep reading the case for up to _HOLD_WAIT (scaled with _PULL_PAUSE, so the
+# fake-city tests stay fast).
+_HOLD_WAIT = 150.0
+_HOLD_POLL = 2.0
 # Needs whose sent offers this process remembers; the oldest is forgotten first.
 _SENT_NEEDS = 4096
 
@@ -698,7 +780,13 @@ def _notice_lang(chat: list[Message]) -> str:
 
 async def handle(role: str, city: City, message: Message, chat: list[Message]) -> None:
     token = _TURN_TO.set(set())
+    first_token = cap_token = None
     try:
+        try:
+            first_token = _CASE_FIRST.set(_first_agenda(chat))
+            cap_token = _CASE_CAP.set(_late_cap(chat, city.agent_id))
+        except Exception:  # noqa: BLE001 - the window cap is a refinement, never fatal
+            pass
         await _handle(role, city, message, chat)
         if message.sender.startswith("citizen:") and message.sender not in _TURN_TO.get():
             await _never_silent(role, city, message, chat)
@@ -708,6 +796,10 @@ async def handle(role: str, city: City, message: Message, chat: list[Message]) -
         await _safety_net(city, message, chat, error)
     finally:
         _TURN_TO.reset(token)
+        if first_token is not None:
+            _CASE_FIRST.reset(first_token)
+        if cap_token is not None:
+            _CASE_CAP.reset(cap_token)
 
 
 # Who this turn wrote to: the "never silent" check below reads it after the role's handler.
@@ -1293,7 +1385,7 @@ def fitting(
     elif priority == "P":
         horizon = None
     else:
-        horizon = _agenda_plus(now, _DEADLINE_DAYS.get(priority or "", 14))
+        horizon = _horizon(now, priority or "")
     earliest = now + (_LEAD if priority == "U" else _LEAD_PLANNED)
     chosen: list[tuple[datetime, dict[str, str]]] = []
     for line in lines:
@@ -2182,7 +2274,7 @@ def _need_more_pages(text: str, now: datetime, priority: str | None) -> bool:
     if priority == "U":
         horizon = now.replace(hour=23, minute=59, second=59, microsecond=0)
     elif priority in _DEADLINE_DAYS:
-        horizon = _agenda_plus(now, _DEADLINE_DAYS[priority])
+        horizon = _horizon(now, priority)
     else:
         return len(times) < _OFFERS * 2  # planned visit: enough choice already in hand
     try:
@@ -2305,14 +2397,10 @@ def _number_in_words(text: str) -> str | None:
 
 
 def _lang(chat: list[Message]) -> str:
-    # What the citizen explicitly asks for wins over the profile token: lang=de citizens wrote
-    # "a doctor who speaks English", we searched partners for German and the journey stopped
-    # (21 Nov, ...254/...212/...151), while our own h1/s1/c1 speak English.
-    for row in chat:
-        if row.sender.startswith("citizen:"):
-            asked = _lang_asked(row.text or "")
-            if asked:
-                return asked
+    # The citizen's lang= token decides, not the words: wave W01QQQ (21 Nov 12:00) lang=si
+    # citizens wrote "English speaking doctor", we offered h1 (it/en) and they cancelled four
+    # times with reason=lang (28 cancels). The judge also counts the valid set by the token.
+    # The words only decide when no token was sent (level 3).
     said = []
     for row in chat:
         if row.sender.startswith("citizen:"):
@@ -3657,11 +3745,14 @@ def _fits_partner(
     if priority == "U":
         return at.date() == now.date()
     if priority in _DEADLINE_DAYS:
-        return at < _agenda_plus(now, _DEADLINE_DAYS[priority])
+        try:
+            return at < _horizon(now, priority)
+        except TypeError:
+            return at < _agenda_plus(now, _DEADLINE_DAYS[priority])
     return True
 
 
-_MAX_PARTNERS = 12  # per round: 25 answers per case flooded our mailbox (level 6: time matters)
+_MAX_PARTNERS = 5  # per round (MACH 1.4): 12 and 25 hit the rate limit and flooded our mailbox
 
 
 async def _go_partner(
@@ -5123,12 +5214,49 @@ def _latest_hold(chat: list[Message], agent: str) -> tuple[str, str | None]:
     return consent, number
 
 
+async def _await_patient(
+    city: City,
+    need_id: str | None,
+    chat: list[Message],
+    head: str,
+    token: str,
+    *,
+    op: str,
+) -> tuple[Message, list[Message]] | None:
+    """_await_line, then keep reading the case every _HOLD_POLL s up to _HOLD_WAIT."""
+
+    found = await _await_line(city, need_id, chat, head, token, op=op)
+    if found is not None:
+        return found
+    budget = min(_HOLD_WAIT, _PULL_PAUSE * 1500)
+    poll = min(_HOLD_POLL, max(_PULL_PAUSE * 20, 0.001))
+    known = {row.msg_id for row in chat}
+    start = time.monotonic()
+    while time.monotonic() - start < budget:
+        await asyncio.sleep(poll)
+        try:
+            fresh = await city.history(need_id=need_id)
+        except CapError:
+            continue
+        hit = _latest(fresh, head, token)
+        if hit is not None:
+            return hit, fresh
+        for row in fresh:
+            if row.msg_id in known or row.sender != LEDGER:
+                continue
+            if first_word(row.text) == "refused" and (
+                op in words(row.text) or f"op={op}" in row.text or f"operation={op}" in row.text
+            ):
+                return row, fresh
+    return None
+
+
 async def _finish_booking(
     city: City, message: Message, chat: list[Message], slot: str, *, hold_self: bool
 ) -> None:
     """Hold is in the mailbox. Read the held line and commit before this turn ends."""
 
-    found = await _await_line(city, message.need_id, chat, "held", f"slot_id={slot}", op="hold")
+    found = await _await_patient(city, message.need_id, chat, "held", f"slot_id={slot}", op="hold")
     if found is None:
         _LOG.info("care.held.missing", extra={"need_id": (message.need_id or "")[:48]})
         return
@@ -5140,7 +5268,7 @@ async def _finish_booking(
     hold_id = fields_of(reply.text).get("hold_id", "")
     if not hold_id:
         return
-    done = await _await_line(
+    done = await _await_patient(
         city, message.need_id, fresh, "committed", f"booking_id={hold_id}", op="commit"
     )
     if done is None:
@@ -5163,6 +5291,8 @@ async def _on_held(city: City, message: Message, chat: list[Message]) -> None:
         return
     if _our_commit(chat, city.agent_id, hold_id):
         return
+    if not _once(f"commit:{hold_id}"):
+        return  # a parallel turn (late "held" + the patient waiter) is committing it already
     _, consent, number = _booking_of(chat, city.agent_id, slot)
     if not consent:
         consent, held_number = _latest_hold(chat, city.agent_id)
@@ -5200,6 +5330,8 @@ async def _on_committed(city: City, message: Message, chat: list[Message]) -> No
     token = f"booking_id={booking_id}"
     if _we(chat, city.agent_id, token, to=target, word="booking.receipt"):
         return
+    if not _once(f"receipt:{booking_id}:{target}"):
+        return  # one receipt per booking, even with two turns reading the same commit
     extra = ""
     if target.startswith("agent:") and slot:
         # MACH-1: a partner's booking centre matches the receipt to its offer.

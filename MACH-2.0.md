@@ -4,7 +4,7 @@
 
 ## In breve
 
-MACH-2.0 è il protocollo comune tra le 26 ASST, curato da red-agent (ASST Giambellino), la squadra che ha scritto MACH-1. Tiene tutto ciò che vale in MACH-1.2, 1.3 e 1.4 e aggiunge le quattro cose che mancavano: un'identità certa per chi parla nell'anello, la riprenotazione in un messaggio, il consenso legato allo scopo e offerte che arrivano al cittadino anche quando la città è lenta.
+MACH-2.0 (revisione 2.0.1: R3 a 5 strutture per giro, R6 in ore dalla nascita del need) è il protocollo comune tra le 26 ASST, curato da red-agent (ASST Giambellino), la squadra che ha scritto MACH-1. Tiene tutto ciò che vale in MACH-1.2, 1.3 e 1.4 e aggiunge le quattro cose che mancavano: un'identità certa per chi parla nell'anello, la riprenotazione in un messaggio, il consenso legato allo scopo e offerte che arrivano al cittadino anche quando la città è lenta.
 
 È compatibile all'indietro: chi manda `mach=1.2`, `1.3` o `1.4` continua a funzionare. Chi adotta la 2.0 manda `mach=2.0` nelle richieste. Ogni token nuovo è facoltativo da leggere e gratis da ignorare.
 
@@ -48,7 +48,7 @@ La 2.0 tiene le regole della 1.4 e ne cambia o aggiunge otto.
 | Prenotazione saltata | Non regolato | `cancel reason=facility_cancelled` con le alternative nello stesso messaggio, stesso medico per primo (R20) |
 | Doppioni | Non regolato | Stesso `request_id`: stesse offerte. Stesso `confirm`: stessa ricevuta, mai un secondo hold (R21) |
 | Secondo giro | Non regolato | Se il primo giro non trova niente, una seconda richiesta con `request_id=<id>-r2`, prima a chi non ha ancora risposto (R22) |
-| Ampiezza del giro | Tutte le strutture insieme | Al massimo 12 strutture per giro, prima quella che parla la lingua del cittadino (R3) |
+| Ampiezza del giro | 5 strutture per giro | Restano 5 per giro, prima quella che parla la lingua del cittadino (R3) |
 | Slot senza data leggibile | Non regolato | Mai al cittadino (R7) |
 
 ## Identità e fiducia
@@ -131,10 +131,10 @@ Ventidue regole, una per riga. Da R1 a R16 sono quelle della 1.4, riscritte e st
 | --- | --- | --- |
 | R1 | Si risponde a ogni `need.request` subito, con offerte o con un `cancel`. Mai il silenzio. | Un no veloce fa partire la richiesta successiva |
 | R2 | Al cittadino si dice "nessun posto" o si propone la lista d'attesa solo dopo il giro: tutti hanno risposto oppure sono passati 15 s. | Lista d'attesa con S non vuoto: −1 |
-| R3 | Al massimo 12 strutture per giro: prima quella che parla la lingua rara del cittadino, poi le altre dell'anello. I "no" si contano, non si rielaborano. | 25 risposte in fila bloccavano il cittadino per minuti |
+| R3 | Al massimo 5 strutture per giro: prima quella che parla la lingua rara del cittadino, poi le altre dell'anello. I "no" si contano, non si rielaborano. | Con 12 o 25 richieste per giro si sbatte contro il limite di frequenza della città |
 | R4 | Il cittadino sceglie da un solo messaggio, con tutte le offerte valide raccolte. | Una scelta, non tre messaggi in conflitto |
 | R5 | La finestra la decide chi chiede, con `after` e `deadline` (sinonimo `earliest`). Senza, la struttura usa adesso + 1 h per U e + 4 h per le altre. | Solo chi chiede conosce i tempi della propria catena |
-| R6 | Le scadenze si contano in giorni di agenda lavorativi, dalla nascita del need: U lo stesso giorno, B 2 giorni, D 5, P lista d'attesa. Sabato e domenica non contano. | Un B del venerdì sera arriva a martedì, non a domenica |
+| R6 | Le scadenze si contano in ore di calendario dalla nascita del need, non da adesso: U lo stesso giorno, B 48 h, D 120 h, P lista d'attesa. Solo se la scadenza cade di sabato o domenica, quando l'agenda non ha posti, si passa al primo giorno lavorativo. | Contate da adesso o in giorni lavorativi, le finestre partivano offerte che il cittadino rifiuta con `reason=deadline` |
 | R7 | Ogni offerta ha una data leggibile, dentro la finestra. Uno slot senza data non arriva mai al cittadino. | Nessuno slot passato o inventato |
 | R8 | Al confirm la struttura confronta l'agenda: slot passato → `cancel reason=past` con offerte nuove nello stesso messaggio. Poi hold e commit di fila. | Ricevuta senza commit: −2 |
 | R9 | Prima del consenso `cross_asst` escono solo criteri di ricerca. | Dati condivisi prima del consenso: −2 |
@@ -165,7 +165,7 @@ Un minuto reale vale un'ora di agenda: un giro di 15 secondi brucia 15 minuti di
 | Lease predefinito | 900 | R14 |
 | Lease massimo | 1.800 | R14 |
 
-Chi chiede calcola `after` come adesso + 1 h per U e + 4 h per le altre priorità, e `deadline` dalla nascita del need, contando solo i giorni lavorativi dell'agenda (R6). Chi misura una catena più corta dichiara un `lease_s` più basso e fa release: uno slot raro fermo 900 secondi è fermo 15 ore di agenda.
+Chi chiede calcola `after` come adesso + 1 h per U e + 4 h per le altre priorità, e `deadline` dalla nascita del need, in ore di calendario (R6). Chi misura una catena più corta dichiara un `lease_s` più basso e fa release: uno slot raro fermo 900 secondi è fermo 15 ore di agenda.
 
 ## I motivi di un cancel
 
@@ -223,7 +223,7 @@ Le 26 ASST e i loro 130 agenti, dalla mappa ufficiale della città (21 novembre,
 
 ## Codice di riferimento
 
-Solo libreria standard, da mettere accanto ad `agent.py`. Copre lettura riga per riga, finestra in giorni lavorativi, controlli d'identità e di consenso, doppioni e lease. Riempite `RING` con i 130 id della tabella qui sopra.
+Solo libreria standard, da mettere accanto ad `agent.py`. Copre lettura riga per riga, finestra dalla nascita del need, controlli d'identità e di consenso, doppioni e lease. Riempite `RING` con i 130 id della tabella qui sopra.
 
 ```python
 """MACH-2.0 reference helpers (red-agent, ASST Giambellino). Stdlib only: paste next to agent.py."""
@@ -233,7 +233,7 @@ from datetime import datetime, timedelta
 
 MACH = "2.0"
 _TOKEN = re.compile(r"(?<!\S)([a-z_]{2,40})=([A-Za-z0-9._:/+-]{1,80})")
-DEADLINE_DAYS = {"B": 2, "D": 5}  # working agenda days (R6); U = same day; P = waiting list
+DEADLINE_HOURS = {"B": 48, "D": 120}  # plain hours from the need's birth (R6); U = same day; P = waiting list
 LEASE_S, LEASE_MAX, LEASE_SHORT = 900.0, 1800.0, 120.0
 RING: set[str] = set()  # the 130 ids of the city map (R17), e.g. {"agent:h6r1v45esk77", ...}
 
@@ -259,7 +259,7 @@ def when(value: str) -> datetime | None:
 
 
 def plus_working_days(start: datetime, days: int) -> datetime:
-    """R6: the agenda has no Saturday or Sunday."""
+    """R6 weekend fallback: the agenda has no Saturday or Sunday."""
     day = start
     while days > 0:
         day += timedelta(days=1)
@@ -276,8 +276,10 @@ def window(asked: dict[str, str], now: datetime, born: datetime) -> tuple[dateti
     deadline = when(asked.get("deadline", ""))
     if deadline is None and prio == "U":
         deadline = born.replace(hour=23, minute=59)
-    elif deadline is None and prio in DEADLINE_DAYS:
-        deadline = plus_working_days(born, DEADLINE_DAYS[prio])
+    elif deadline is None and prio in DEADLINE_HOURS:
+        deadline = born + timedelta(hours=DEADLINE_HOURS[prio])
+        if deadline.weekday() >= 5:  # no agenda at the weekend: first working day after
+            deadline = plus_working_days(born, DEADLINE_HOURS[prio] // 24)
     return max(after, now), deadline
 
 
@@ -364,6 +366,6 @@ Per aderire basta mandare `mach=2.0` nelle richieste e postare su Discord "MACH-
 | MACH-1.2 | Criteri estesi, offerte rilassate, riprenotazione, idempotenza, soft lock, rule sync | Giack · Toros, ASST Precotto |
 | MACH-1.3 | Finestra decisa da chi chiede, no veloce, lease, controllo dell'agenda al confirm, atto `facts` | lessandrodiaz2006, con le proposte di scuola-di-atene · ASST Corvetto |
 | MACH-1.4 | Tempi misurati della città, offerte tardive, lease legato alla reciprocità, `next_free` | Toros, con le misure del loro centro prenotazioni |
-| MACH-2.0 | Anello ufficiale dalla mappa della città, controlli anti-impostore, consenso legato allo scopo, riprenotazione in un messaggio, doppioni, secondo giro, giorni lavorativi | red-agent · ASST Giambellino |
+| MACH-2.0 | Anello ufficiale dalla mappa della città, controlli anti-impostore, consenso legato allo scopo, riprenotazione in un messaggio, doppioni, secondo giro, scadenze dalla nascita del need | red-agent · ASST Giambellino |
 
 Curato da red-agent, ASST Giambellino. Le misure e le idee delle altre squadre sono citate qui sopra: lo standard è di tutto l'anello, e vince insieme.

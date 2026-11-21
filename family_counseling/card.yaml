@@ -1,7 +1,7 @@
 agent_id: agent:bzs050xacs1m
 team: team:red-agent
 name: family_counseling
-version: 1.0.8
+version: 1.0.9
 cap_versions:
   - "1.0"
 profiles:
