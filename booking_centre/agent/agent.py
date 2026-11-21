@@ -3225,6 +3225,16 @@ async def _advance_alone(
         world = _slots_for(chat, agent, procedure)
         if now is not None and world is not None:
             break
+        if _pass == 2 and fixed is not None and world is None:
+            # The consultorio books its own slots: with a slow Ledger it waited 16-18 min before
+            # the first offer (21 Nov W01QQQ) while it held a recent copy of the same list.
+            # Offer from a copy up to 30 min old; a slot taken meanwhile fails at hold, with
+            # alternatives. The clock floor above keeps past slots out.
+            copy = _world_now(procedure, _STALE_TTL)
+            if copy is not None and (now or _agenda_now()) is not None:
+                now = now or _agenda_now()
+                world = copy
+                break
         if _pass == 2:
             wanted = procedure
             await _ask_own_facility(city, chat, procedure, priority, message.need_id)
@@ -4934,11 +4944,38 @@ def _remember(chat: list[Message]) -> None:
                 _WORLD_SEEN[procedure] = (time.monotonic(), text)
 
 
+# 21 Nov W01QQQ: the consultorio offered 30 December 12:00 at a real time when the agenda was
+# already at 31 December (its clock lagged a slow Ledger), and every citizen cancelled all four
+# offers as past. A citizen's "reason=past" proves the agenda is at least at that slot: keep it
+# as a floor for EVERY case of this agent, running at the learned pace.
+_PAST_SEEN: tuple[float, datetime] | None = None
+
+
 def _agenda_now() -> datetime | None:
-    if _AGENDA_SEEN is None:
-        return None
-    seen, when = _AGENDA_SEEN
-    return when + timedelta(seconds=(time.monotonic() - seen) * _AGENDA_RATE)
+    best: datetime | None = None
+    for mark in (_AGENDA_SEEN, _PAST_SEEN):
+        if mark is None:
+            continue
+        seen, when = mark
+        guess = when + timedelta(seconds=(time.monotonic() - seen) * _AGENDA_RATE)
+        try:
+            if best is None or guess > best:
+                best = guess
+        except TypeError:  # naive vs aware: keep the Ledger's own reading
+            best = best or guess
+    return best
+
+
+def _note_past(at: datetime) -> None:
+    """A citizen called a slot at ``at`` past: the agenda clock is at least there now."""
+
+    global _PAST_SEEN
+    current = _agenda_now()
+    try:
+        if current is None or at > current:
+            _PAST_SEEN = (time.monotonic(), at)
+    except TypeError:
+        pass
 
 
 def _past_floor(chat: list[Message], agent: str) -> datetime | None:
@@ -4954,6 +4991,8 @@ def _past_floor(chat: list[Message], agent: str) -> datetime | None:
         offer = _our_offer(chat, agent, fields.get("offer_id", ""))
         at = _when(offer.get("agenda_date") or offer.get("at") or "")
         _learn_past(offer.get("slot_id", ""), at)
+        if at is not None:
+            _note_past(at)
         if at is not None and (floor is None or at > floor):
             floor = at
     return floor
