@@ -916,6 +916,12 @@ _TRUSTED_AGENTS: set[str] = {
     # asst-bicocca, team p4radigm
     "agent:ez8cb7j167p2", "agent:rng5wcrzvhsj", "agent:bb01ggxymm05", "agent:sh35cbsy287d",
     "agent:nkh372rd16yq",
+    # asst-corvetto, team scuola-di-atene
+    "agent:yzcs4p44ep39", "agent:hkrtm1gzjb24", "agent:x0vr9rbwpesr", "agent:h8425ac7btd8",
+    "agent:p0n57t7vtpq0",
+    # asst-lorenteggio, team raspberry
+    "agent:qtjne8symjas", "agent:w2qsptc9qqhg", "agent:tmt0bcv0st1f", "agent:n9bf9y6670hp",
+    "agent:mcppmrbjvxag",
     # asst-bovisa, team prompt-soccorso
     "agent:vgtmj5nqfkxj", "agent:h82xpx3rkn9e", "agent:gxq3vzgt3h5t", "agent:tty8erdj6t41",
     "agent:txar5994gbkj",
@@ -928,6 +934,9 @@ _KNOWN_FACILITIES: dict[str, str] = {
     "agent:nanpr5mgm2py": "hospital.physiatry",          # Lambrate
     "agent:pky3vqyqbepa": "specialist_care.cardiology",  # Lambrate
     "agent:atp772whjkgd": "family_counseling.gynecology",  # Lambrate
+    "agent:tmt0bcv0st1f": "hospital.physiatry",          # Lorenteggio
+    "agent:n9bf9y6670hp": "specialist_care.cardiology",  # Lorenteggio
+    "agent:mcppmrbjvxag": "family_counseling.gynecology",  # Lorenteggio
     "agent:gxq3vzgt3h5t": "hospital.physiatry",          # Bovisa
     "agent:tty8erdj6t41": "specialist_care.cardiology",  # Bovisa
     "agent:txar5994gbkj": "family_counseling.gynecology",  # Bovisa
@@ -937,6 +946,11 @@ _STRICT_PARTNERS = os.environ.get("CITY_STRICT_PARTNERS", "") == "1"
 # Partner facilities the teams gave us on Discord (service -> agent id), by rare language.
 # They are asked first for that language, and always asked, even if the Index misses them.
 _PARTNER_AGENTS: dict[str, dict[str, str]] = {
+    "fr": {  # asst-corvetto, team scuola-di-atene (French)
+        "hospital.physiatry": "agent:x0vr9rbwpesr",
+        "specialist_care.cardiology": "agent:h8425ac7btd8",
+        "family_counseling.gynecology": "agent:p0n57t7vtpq0",
+    },
     "ja": {  # asst-lambrate, team LTF-JECATT (Japanese)
         "hospital.physiatry": "agent:nanpr5mgm2py",
         "specialist_care.cardiology": "agent:pky3vqyqbepa",
