@@ -2234,6 +2234,16 @@ _DESK_SAY: dict[str, dict[str, str]] = {
         "suo codice (offer_id).",
         "en": "Here are the available times again: to choose one, reply with its code (offer_id).",
     },
+    "cross_wait": {
+        "it": "Grazie! Sto cercando nelle ASST vicine: tra pochi secondi le mando gli orari "
+        "disponibili, tutti in un solo messaggio.",
+        "en": "Thank you! I am checking nearby ASSTs: in a few seconds I will send you the "
+        "available times, all in one message.",
+        "es": "¡Gracias! Estoy buscando en las ASST cercanas: en unos segundos le envío los "
+        "horarios disponibles, todos en un solo mensaje.",
+        "fr": "Merci ! Je cherche dans les ASST voisines : dans quelques secondes je vous "
+        "envoie les horaires disponibles, tous dans un seul message.",
+    },
     "receipt": {
         "it": "Prenotazione confermata. Porti con sé la tessera sanitaria e arrivi qualche "
         "minuto prima. Se può, usi i mezzi pubblici: si evita il traffico e si inquina meno.",
@@ -3121,6 +3131,16 @@ async def _cross_turn(city: City, message: Message, chat: list[Message], citizen
     )
     if (batch and not all(o["slot_id"] in declined for o in batch)) or (waiting and not batch):
         return
+    # Speed (+1 fast reply): partners can take up to _PARTNER_WAIT. Answer the citizen's consent
+    # at once with one short line, then the times follow in one message. Only when no fitting
+    # partner slot is already in hand, and once per case.
+    if (
+        message.sender == citizen
+        and not batch
+        and not _fitting_partner_offers(chat, agent, priority)
+        and _once(f"cross-ack:{message.need_id or message.msg_id}")
+    ):
+        await _say(city, citizen, _desk_line("cross_wait", chat))
     if not _partner_offers(chat, agent) and message.sender == citizen:
         chat = await _until(city, message.need_id, chat, lambda rows: bool(_partner_offers(rows, agent)))
     # Partners answer within a few seconds of each other: wait for the window once, then

@@ -62,6 +62,8 @@ async def main():
     out = await say(c, CIT, "consent consent_ref=cx-9 purpose=cross_asst")
     await task
     check("slow partner: its slot offered, no waiting list", any("slot_id=P1" in t for _, t in out) and not any("waiting_list=true" in t for _, t in out), str(out))
+    check("fast reply: instant 'checking nearby ASSTs' line first", out and "ASST vicine" in out[0][1] and not A._offers_in(out[0][1]), str(out[:1]))
+    check("fast reply: then ONE offer message", len([1 for _, t in out if A._offers_in(t)]) == 1, str(out))
 
     # 3. Partners silent: the waiting list after the wait, never stuck
     c = FakeCity(slots=[], peers=peers)
@@ -73,7 +75,8 @@ async def main():
     c = FakeCity(slots=[], peers=peers)
     await say(c, CIT, "prenoto prescription_number=rx-1")
     c.add(PA, BC, poff("P1", PA) + "\n" + poff("P2", PA, hour=12))
-    await say(c, CIT, "consent consent_ref=cx-9 purpose=cross_asst")
+    out = await say(c, CIT, "consent consent_ref=cx-9 purpose=cross_asst")
+    check("fast reply: no extra line when partner slots are already in hand", not any("ASST vicine" in t for _, t in out), str(out))
     await say(c, CIT, "confirm offer_id=po-P1 consent_ref=cons-b")
     m = c.add(PA, BC, "cancel offer_id=po-P1 reason=hold_refused ledger_code=SLOT_TAKEN")
     c.out.clear(); await A.handle("booking_centre", c, m, await c.history(need_id=c.need))
