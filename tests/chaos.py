@@ -10,6 +10,9 @@ from city_sdk.city import Message, CapError, LEDGER, Peer
 A._PULL_PAUSE = 0.001; A._REPORT_WAIT = 0.05; A._REPORT_POLL = 0.01; A._PARTNER_WAIT = 0.1
 A._PARTNER_POLL = 0.01; A._PARTNER_SETTLE = 0.01; A._FIRST_SLOT_WAIT = 0.05; A._LLM_TIMEOUT = 0.05
 A._PROTOCOL_ASKED = True
+# 21 Nov: the booking's slow-Ledger patience (2 min, re-ask) and the rare-language partner wait
+# would make 1,275 silent-Ledger turns run for hours: shrink them like the other waits.
+A._SLOW_WAIT = 0.2; A._SLOW_REASK = 0.1; A._SLOW_POLL = 0.01; A._RARE_WAIT = 0.1
 
 fired = []
 class Net(logging.Handler):

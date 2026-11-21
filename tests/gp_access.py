@@ -94,7 +94,11 @@ async def main():
     bare = next(i for i, (to, t) in enumerate(sent) if to == LEDGER and t == "world")
     reply = next(i for i, (to, _) in enumerate(sent) if to == GCIT)
     check("protocol: table read (bare world) only after the citizen is answered", reply < bare, str(order))
-    check("protocol: new row learned", A._PROTOCOLS.get("SYM-SHOULDER") == ("VIS-FIS", "D"))
+    # The GP no longer waits for the answer (21 Nov speed): it arrives as its own turn and is
+    # learned there, without reading the case (main() -> _gp_echo).
+    answer = next(r for r in c.rows if r.sender == LEDGER and "symptom_code=" in r.text)
+    A._gp_echo(answer)
+    check("protocol: new row learned (from the answer's own turn)", A._PROTOCOLS.get("SYM-SHOULDER") == ("VIS-FIS", "D"))
     await gp(G(), "ho mal di ginocchio")
     check("protocol: asked once per process", A._PROTOCOL_ASKED)
     A._PROTOCOLS.clear(); A._PROTOCOLS.update(saved)
