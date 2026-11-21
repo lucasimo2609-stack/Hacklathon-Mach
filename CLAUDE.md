@@ -40,6 +40,27 @@ never `city init` or `city retire`.
 - Friendly, useful human text after the tokens earns the review's +1 (first POSITIVE reviews
   appeared once we added it). Never put act words (offer, confirm, cancel, consent,
   prescription, checkin, report) as standalone words inside the friendly text unless intended.
+- **The agenda has no Saturday/Sunday.** Priority windows count agenda working days
+  (`_agenda_plus`): B on Friday evening runs to Tuesday evening. Calendar days dropped every
+  Monday/Tuesday slot -> "no booking although acceptable slots were free" (-1), 21 Nov 10:05.
+- **A Ledger answer does not always open a turn.** Never end a booking turn waiting on it:
+  `_slow_ledger` tells the citizen once, re-asks every 30 s after 60 s, waits up to 2 min. A
+  silent turn + "mi riscriva" stalled ~20 cases at once.
+- **Never say "no slot in our ASST" before the Ledger answered** (`_slots_for` is None until
+  a world reply exists); when it is slow, ask our own facility directly (`need.request
+  source=own_asst`); our facilities are never "partners" (`_OWN_FACILITY_IDS`).
+- **The first offer list must fit, or the citizen cancels it all and the journey stops.**
+  Named days are a hard filter; "only certain days" -> ask days+gender once; an explicit
+  language request ("a doctor who speaks English") beats the profile `lang=` token.
+- **Concurrency:** `city scale <agent> --min 1 --max 1 --concurrency 40` (not a deploy, no
+  quota). Keep 1 replica (in-process locks/memory). A deploy may reset it: re-apply after
+  every deploy. Bursts of 20 citizens queued for minutes before this.
+- **Whole-city latency ~3 min per step** (even the citizens' own replies): not our agents.
+- **Never edit the shared brain while a regression+commit job runs** (`git add -A` picks the
+  edit up). Work in a copy outside the repo, apply after. The guard "commit only if TOTAL BAD:
+  0" stopped two broken pushes on 21 Nov.
+- Heredoc + Python patch scripts: write `\b`/`\n` via `chr(92)+"b"` / `chr(10)`, or they land
+  as control characters / real newlines in agent.py (check `ast.parse` after every patch).
 
 ## MACH-1.2 (common inter-ASST format, from 21 Nov 01:15)
 
@@ -157,6 +178,27 @@ $PY -I tests/bc_ring.py booking_centre/agent tests/bc_test.py    # rare language
 $PY -I tests/h_l7.py hospital/agent hospital      # L7: duplicate request -> same offers, duplicate confirm -> same receipt
 $PY -I tests/impostor.py hospital/agent hospital  # Sat 10:00: agents outside the ring get no slots, holds or citizens
 $PY -I tests/gp_l8.py gp/agent                 # L8: hidden red flags escalated, negated/harmless ones not
+$PY -I tests/gp_slow.py gp/agent 1.0           # slow city: prescription to citizen after 2 calls, extras after
+$PY -I tests/bc_weekend.py booking_centre/agent tests/bc_test.py  # Friday evening B -> Mon/Tue slots offered
+$PY -I tests/bc_slow.py booking_centre/agent tests/bc_test.py     # Ledger 15/80 s late: one holding line, offers same turn
+$PY -I tests/bc_stall.py booking_centre/agent tests/bc_test.py    # Ledger drops requests for 70 s: re-ask, offers
+$PY -I tests/bc_prefs.py booking_centre/agent tests/bc_test.py    # named days hard filter, vague days -> ask
+$PY -I tests/bc_lang_ask.py booking_centre/agent tests/bc_test.py # "doctor who speaks English" beats lang=de
+$PY -I tests/bc_own.py booking_centre/agent tests/bc_test.py      # booking asks our own hospital when Ledger slow
+```
+
+One loop runs everything (each file with its own args):
+`for t in tests/*.py; do case $(basename $t) in bc_test.py|bc_speed.py) a="booking_centre/agent";; bc_*|theme.py) a="booking_centre/agent tests/bc_test.py";; gp_access.py) a="gp/agent tests/bc_test.py";; gp_slow.py) a="gp/agent 1.0";; gp_*) a="gp/agent";; sp_*) a="specialist/agent";; h_test.py|h_desk.py|h_rebook.py|h_l7.py|impostor.py|mach12.py) a="hospital/agent hospital";; h_alt.py) a="hospital/agent tests/h_desk.py";; *) a="hospital/agent";; esac; $PY -I $t $a; done`
+
+## Deploy from Windows (one deployer, one agent per 5 min)
+
+```powershell
+cd "C:\My Projects\Mach"; git pull
+$env:PYTHONIOENCODING="utf-8"; $env:PYTHONUTF8="1"
+city deploy booking_centre          # 2-8 min, ends "Released ...@1.0.x"
+city status agent:booking_centre    # Deployed Yes visible <version>
+city scale booking_centre --min 1 --max 1 --concurrency 40
+git add booking_centre/card.yaml; git commit -m "Deployed booking_centre"; git push
 ```
 
 All must pass before any deploy.
@@ -167,6 +209,25 @@ Every 30 min: Journeys (all waves, "Prima i falliti") → open each Fallito / NE
 verdict line; read agent Log tabs; check level on the public board. Fix only clear,
 reproducible causes, add a test scenario, run all suites, push, deploy only affected agents one
 at a time.
+
+## State (Sat 21 Nov, 11:40)
+
+- Leaderboard 11:28: **Red Agent 12th, 4,925**; 9th (last finalist slot) Raspberry 5,059.
+  Completed bookings are the multiplier (booking +2, check-in +2, slot +1, report +2, reviews).
+- Live (deployed by this folder unless noted): GP 1.0.12 and booking 1.0.23 were deployed by
+  the other account WITHOUT pushing their card bumps (unknown exact code); this session:
+  booking **1.0.24** (deploying 11:35: weekend + slow-Ledger re-ask + preferences + language +
+  own-facility channel), hospital 1.0.8, consultorio 1.0.7. All at concurrency 40.
+- Fixed today from Journeys: weekend priority windows (journey ...344), slow-Ledger stall and
+  false "no slots" (~20 open cases), first offers ignoring days/gender/past (...298/...225),
+  lang=de/ro citizens asking for English sent to partners and stopped (...254/...212/...151),
+  GP replies 5-9 min late (now reply right after `prescribe`, extras after).
+- **Parked, not finished:** specialist books the CTRL-CARD control itself after the report
+  (`$TEMP/agent_with_control.py`, test `$TEMP/sp_control.py` failed 4/4: the report-consent
+  branch swallows the confirm). Do not deploy until it passes.
+- Rejected on purpose: specialist -> hospital physiatry referral (not in the protocol: wrong
+  prescription / clinical advice risk). A 6 h lead time (broke level-4 same-day tests; kept 2 h).
+- 30-min auto-check runs in the original session only (job `aa02f0d4`, read-only for the city).
 
 ## State (Sat 21 Nov, 08:30)
 
