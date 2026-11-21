@@ -1125,16 +1125,35 @@ async def _until(
     """Re-read the case until ``ready`` or the short wait ends. The push may never arrive."""
 
     fresh = chat
-    for attempt in range(_PULL_TRIES):
+    for pause in _poll_pauses():
         try:
             fresh = await city.history(need_id=need_id)
         except CapError:
             fresh = chat
         if ready(fresh):
             return fresh
-        if attempt + 1 < _PULL_TRIES:
-            await asyncio.sleep(_PULL_PAUSE)
+        if pause is None:
+            break
+        await asyncio.sleep(pause)
     return fresh
+
+
+def _poll_pauses():
+    """Pauses between case reads inside the short wait (_PULL_TRIES * _PULL_PAUSE, 6 s live):
+    the first read is quick, then the gap grows x1.5 up to 10 * _PULL_PAUSE. 21 Nov 13:40: the
+    booking centre made 32 history reads in 2 s while dozens of turns waited on a slow Ledger,
+    loading the relay and holding its 80 slots; ~11 reads per wait instead of 60. Yields the
+    pause before the next read, then None when the budget is spent."""
+
+    budget = _PULL_TRIES * _PULL_PAUSE
+    cap = 10 * _PULL_PAUSE
+    pause = _PULL_PAUSE
+    spent = 0.0
+    while spent + pause <= budget:
+        yield pause
+        spent += pause
+        pause = min(pause * 1.5, cap)
+    yield None
 
 
 async def _await_line(
@@ -1150,7 +1169,7 @@ async def _await_line(
 
     known = {row.msg_id for row in chat}
     fresh = chat
-    for attempt in range(_PULL_TRIES):
+    for pause in _poll_pauses():
         try:
             fresh = await city.history(need_id=need_id)
         except CapError:
@@ -1165,8 +1184,9 @@ async def _await_line(
                 op in words(row.text) or f"op={op}" in row.text or f"operation={op}" in row.text
             ):
                 return row, fresh
-        if attempt + 1 < _PULL_TRIES:
-            await asyncio.sleep(_PULL_PAUSE)
+        if pause is None:
+            break
+        await asyncio.sleep(pause)
     return None
 
 
@@ -3562,7 +3582,7 @@ _PREFETCH = ("VIS-FIS", "VIS-CARD")
 _SLOW_WAIT = 120.0  # a slow Ledger: 45 s was not enough on 21 Nov (holding lines left 8-10 min)
 _SLOW_WL = "wl-slow-"  # waiting list sent when the Ledger never answered: real slots still upgrade it
 _SLOW_REASK = 60.0  # half-way: ask the Ledger again, its first answer may be lost
-_SLOW_POLL = 1.0
+_SLOW_POLL = 3.0  # 1 s polled the relay 120 times per slow case (21 Nov 13:40 overload); 3 s = 40
 
 
 async def _slow_ledger(
