@@ -3613,10 +3613,15 @@ async def _cross_turn(city: City, message: Message, chat: list[Message], citizen
     if (
         message.sender == citizen
         and not batch
+        and not _we(chat, agent, f"offer_id=wl-{message.need_id or 'case'}", to=citizen, word="offer")
         and not _fitting_partner_offers(chat, agent, priority)
         and _once(f"cross-ack:{message.need_id or message.msg_id}")
     ):
         await _say(city, citizen, _desk_line("cross_wait", chat))
+    patient = message.sender == citizen or (
+        first_word(message.text) == "cancel"
+        and bool(_our_offer(chat, agent, fields_of(message.text).get("offer_id", "")))
+    )
     if not _partner_offers(chat, agent) and message.sender == citizen:
         chat = await _until(city, message.need_id, chat, lambda rows: bool(_partner_offers(rows, agent)))
     # Partners answer within a few seconds of each other: wait for the window once, then
@@ -3626,7 +3631,7 @@ async def _cross_turn(city: City, message: Message, chat: list[Message], citizen
     while len(_CROSS_SEEN) > _SENT_NEEDS:
         _CROSS_SEEN.pop(next(iter(_CROSS_SEEN)))
     pause = _PARTNER_SETTLE - (time.monotonic() - start)
-    if pause > 0:
+    if pause > 0 and patient:
         await asyncio.sleep(pause)
         try:
             chat = await city.history(need_id=message.need_id)
@@ -3639,7 +3644,8 @@ async def _cross_turn(city: City, message: Message, chat: list[Message], citizen
     procedure = rx.get("procedure", "") or ("CONS-GIN" if role_of() == "family_counseling" else _visit_procedure(chat) or "")
     rare = _lang_partner(chat, procedure) if procedure else ""
     while (
-        _partners_pending(chat, agent)
+        patient
+        and _partners_pending(chat, agent)
         and not _fitting_partner_offers(chat, agent, priority)
         and (
             time.monotonic() - start < _PARTNER_WAIT
@@ -3662,7 +3668,7 @@ async def _cross_turn(city: City, message: Message, chat: list[Message], citizen
             seen_slots.add(slot)
             fresh.append((sender, offer))
     fresh = _rank_partner_offers(fresh, _lang(chat))[:6]
-    if not fresh and procedure and _rounds(chat, agent) < 2 and _once(f"round2:{key}"):
+    if not fresh and patient and procedure and _rounds(chat, agent) < 2 and _once(f"round2:{key}"):
         closed = _declined(chat, agent) | _we_cancelled(chat, agent, citizen)
         if not [o for o in batch if o["slot_id"] not in closed] and await _ask_again(
             city, chat, procedure, priority, message.need_id
@@ -4201,6 +4207,11 @@ async def _partner_cancel(
                 )
                 await _offers_again(city, chat, as_citizen)
                 return
+    if not (offer_id and citizen and _our_offer(chat, city.agent_id, offer_id)):
+        # A partner's "no availability" answer: the citizen's own turn polls for these. Running
+        # the whole case for each of 25 partner answers queued every turn of the case behind
+        # the gate (21 Nov 02:05-02:15: 1.5-3 minutes before the citizen's first answer).
+        return
     await _advance(city, message, chat, fixed=fixed, replacing=True)
 
 

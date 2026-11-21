@@ -84,6 +84,13 @@ async def main():
     await say(c, CIT, "data.response purpose=cross_asst")
     out = await say(c, FORL, poff("F5", FORL))
     check("late German slot shown to the citizen", any("slot_id=F5" in t for _, t in out), str(out))
+    print("6 a partner's 'no availability' is answered at once, never queued behind the case")
+    c = FakeCity(slots=[])
+    await say(c, CIT, "prenoto prescription_number=rx-1 lang=de")
+    t0 = time.monotonic()
+    out = await say(c, FORL, f"cancel reason=no_availability procedure=VIS-FIS request_id={c.need}")
+    took = time.monotonic() - t0
+    check("partner no-availability turn is quick and silent", took < 0.5 and not out, f"{took:.2f}s {out}")
     print("failures:", bad)
     sys.exit(1 if bad else 0)
 asyncio.run(main())
