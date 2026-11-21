@@ -36,6 +36,7 @@ class C:
     async def llm(s, *a, **k): raise CapError("KEY_UNKNOWN", "x")
 def warm(age_s):
     A._WORLD_SEEN.clear(); A._INFLIGHT = 0
+    A._FAC_WORLD_ASKED["VIS-FIS"] = time.monotonic()  # keep the list-warming request out of these checks
     A._AGENDA_SEEN = (time.monotonic(), datetime(2026, 11, 3, 8, 0, tzinfo=timezone.utc))
     if age_s is not None:
         A._WORLD_SEEN["VIS-FIS"] = (time.monotonic() - age_s, "slots page=1/1\n" + line(1, "2026-11-04T10:30"))

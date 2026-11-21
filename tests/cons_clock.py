@@ -42,7 +42,7 @@ class C:
 def offered(c, cit):
     return [A.fields_of(l).get("slot_id") for to, t in c.out if to == cit for l in t.splitlines() if l.startswith("offer offer_id=of-")]
 def reset():
-    A._WORLD_SEEN.clear(); A._AGENDA_SEEN = None; A._PAST_SEEN = None; A._INFLIGHT = 0
+    A._WORLD_SEEN.clear(); A._AGENDA_SEEN = None; A._PAST_SEEN = None; A._INFLIGHT = 0; A._PAST_REPORTS.clear()
     A._LEARNED_LEAD = timedelta(0); A._OFFER_NOW.clear(); A._DOWN.clear()
 async def main(role):
     reset()
@@ -55,8 +55,14 @@ async def main(role):
     victim_at = next(l for l in SLOTS if f"slot_id={victim} " in l)
     at = A._when(A.fields_of(victim_at)["at"])
     await A.handle(role, c1, c1.add(cit1, ME, f"Non posso. cancel offer_id=of-{victim} reason=past"), await c1.history())
+    # A lag of a day needs a second, different citizen saying the same (one citizen may just
+    # dislike the date): the next case does.
+    c1b = C("2026-11-03T08:00"); cit1b = "citizen:a/1b"
+    await A.handle(role, c1b, c1b.add(cit1b, ME, "vorrei una visita al consultorio"), await c1b.history())
+    if f"of-{victim}" in " ".join(t for to, t in c1b.out if to == cit1b):
+        await A.handle(role, c1b, c1b.add(cit1b, ME, f"No. cancel offer_id=of-{victim} reason=past"), await c1b.history())
     clock = A._agenda_now()
-    check("past cancel moves this agent's clock to at least that slot", clock is not None and clock >= at, f"{clock} < {at}")
+    check("two citizens' past cancels move this agent's clock to at least that slot", clock is not None and clock >= at, f"{clock} < {at}")
     # Case 2: a new citizen, the Ledger STILL reports the stale Tue 08:00.
     c2 = C("2026-11-03T08:00"); cit2 = "citizen:b/2"
     await A.handle(role, c2, c2.add(cit2, ME, "buongiorno, vorrei una visita al consultorio"), await c2.history())

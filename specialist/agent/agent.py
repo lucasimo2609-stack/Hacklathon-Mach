@@ -187,6 +187,8 @@ def _age(message: Message) -> float | None:
         age = (datetime.now(timezone.utc) - stamp).total_seconds()
     except (TypeError, ValueError, OverflowError):
         return None
+    if age < -60 or age > 6 * 3600:
+        return None  # clocks disagree (or a replayed message): never treat it as "old"
     return age if age >= 0 else 0.0
 
 
@@ -975,8 +977,10 @@ async def _handle(role: str, city: City, message: Message, chat: list[Message]) 
     elif role == "booking_centre":
         await _desk(city, message, chat, hold_self=False, fixed=None)
     elif role == "hospital":
+        await _warm_own_world(city, role)
         await _facility(city, message, chat, reports=False, hold_self=False)
     elif role == "specialist_care":
+        await _warm_own_world(city, role)
         await _facility(city, message, chat, reports=True, hold_self=False)
     elif role == "family_counseling":
         await _family(city, message, chat)
@@ -4956,6 +4960,9 @@ def _remember(chat: list[Message]) -> None:
 # offers as past. A citizen's "reason=past" proves the agenda is at least at that slot: keep it
 # as a floor for EVERY case of this agent, running at the learned pace.
 _PAST_SEEN: tuple[float, datetime] | None = None
+_PAST_MAX_JUMP = timedelta(hours=6)
+_PAST_REPORTS: list[tuple[float, datetime, str]] = []  # (real time, slot called past, case)
+_PAST_CONFIRM = 600.0  # a big jump needs a second, different case within 10 real minutes
 
 
 def _agenda_now() -> datetime | None:
@@ -4973,14 +4980,34 @@ def _agenda_now() -> datetime | None:
     return best
 
 
-def _note_past(at: datetime) -> None:
-    """A citizen called a slot at ``at`` past: the agenda clock is at least there now."""
+def _note_past(at: datetime, case: str = "") -> None:
+    """A citizen called a slot at ``at`` past: the agenda clock is at least there now.
+
+    Citizens also write reason=past for a date they simply do not want (21 Nov, consultorio:
+    "questa data non mi è congeniale ... reason=past"), and one such slot days ahead would push
+    the clock forward for EVERY case and hide every valid slot. So: a lag up to
+    _PAST_MAX_JUMP moves the clock at once; a bigger one only when a second, different case
+    says the same within _PAST_CONFIRM, and then only to the nearer of the two (prudent)."""
 
     global _PAST_SEEN
     current = _agenda_now()
+    real = time.monotonic()
     try:
-        if current is None or at > current:
-            _PAST_SEEN = (time.monotonic(), at)
+        if current is not None and at <= current:
+            return
+        if current is None or at <= current + _PAST_MAX_JUMP:
+            _PAST_SEEN = (real, at)
+            return
+        _PAST_REPORTS[:] = [r for r in _PAST_REPORTS if real - r[0] < _PAST_CONFIRM][-50:]
+        others = [
+            r[1] + timedelta(seconds=(real - r[0]) * _AGENDA_RATE)
+            for r in _PAST_REPORTS if r[2] != case and r[1] > current + _PAST_MAX_JUMP
+        ]
+        _PAST_REPORTS.append((real, at, case))
+        if others:
+            target = min([at] + others)
+            if target > current:
+                _PAST_SEEN = (real, target)
     except TypeError:
         pass
 
@@ -4999,7 +5026,7 @@ def _past_floor(chat: list[Message], agent: str) -> datetime | None:
         at = _when(offer.get("agenda_date") or offer.get("at") or "")
         _learn_past(offer.get("slot_id", ""), at)
         if at is not None:
-            _note_past(at)
+            _note_past(at, row.need_id or "")
         if at is not None and (floor is None or at > floor):
             floor = at
     return floor
@@ -5185,6 +5212,7 @@ async def _partner_request(
             try:
                 while time.monotonic() - start < budget and not ready(chat):
                     await asyncio.sleep(poll)
+                    poll = min(poll * 1.5, max(poll, 5 * _HOLD_POLL * (_PULL_PAUSE / 0.1)))
                     try:
                         chat = await city.history(need_id=message.need_id)
                     except CapError:
@@ -5276,7 +5304,41 @@ async def _partner_request(
     await _say(city, partner, "\n".join(offers))
 
 
+# Facilities keep their own slot list warm (21 Nov 15:05: the booking's direct channel answered
+# "ledger_slow" because no facility held a copy - each agent is its own process and only the
+# GP refreshed its list). On any turn, if our copy is older than _FAC_WORLD_EVERY, ask the
+# Ledger for our own list without waiting: the answer, even 17 min late, lands in a case and
+# _remember() keeps it (copies are used up to _STALE_TTL = 30 min).
+_FAC_WORLD_EVERY = 120.0
+_FAC_WORLD_ASKED: dict[str, float] = {}
+_OWN_PROCEDURES = {
+    "hospital": ("VIS-FIS",),
+    "specialist_care": ("VIS-CARD", "CTRL-CARD"),
+    "family_counseling": ("CONS-GIN",),
+}
+
+
+async def _warm_own_world(city: City, role: str) -> None:
+    try:
+        calls = []
+        for procedure in _OWN_PROCEDURES.get(role, ()):
+            seen = _WORLD_SEEN.get(procedure)
+            fresh = seen is not None and time.monotonic() - seen[0] < _FAC_WORLD_EVERY
+            asked = _FAC_WORLD_ASKED.get(procedure)
+            if fresh or (asked is not None and time.monotonic() - asked < _FAC_WORLD_EVERY):
+                continue
+            _FAC_WORLD_ASKED[procedure] = time.monotonic()
+            calls.append(_say(city, LEDGER, f"world procedure={procedure} page=1"))
+        if calls and _agenda_now() is None:
+            calls.append(_say(city, LEDGER, "agenda"))
+        if calls:
+            await asyncio.gather(*calls, return_exceptions=True)
+    except Exception:  # noqa: BLE001 - keeping a copy warm never breaks the real turn
+        return
+
+
 async def _family(city: City, message: Message, chat: list[Message]) -> None:
+    await _warm_own_world(city, "family_counseling")
     if _facility_turn(message):
         await _facility(city, message, chat, reports=False, hold_self=True)
         return
@@ -5469,6 +5531,9 @@ async def _patient_loop(
 ) -> tuple[Message, list[Message]] | None:
     while time.monotonic() - start < budget:
         await asyncio.sleep(poll)
+        # Back off: every read loads the whole case from the relay (21 Nov: dozens of turns
+        # polling every 2 s loaded the platform). 2 s, 3 s, 4.5 s ... up to 10 s.
+        poll = min(poll * 1.5, max(poll, 5 * _HOLD_POLL * (_PULL_PAUSE / 0.1)))
         try:
             fresh = await city.history(need_id=need_id)
         except CapError:
@@ -5866,6 +5931,11 @@ def _report_asked(chat: list[Message], agent: str, citizen: str) -> str:
 
 def _visit_procedure(chat: list[Message]) -> str:
     for row in reversed(chat):
+        # Slot lists and our own list requests name every procedure (VIS-CARD and CTRL-CARD):
+        # they say nothing about THIS visit. Reading them made the specialist skip the CTRL-CARD
+        # follow-up (+2) once facilities refreshed their list (21 Nov, h_warm / sp_flow).
+        if first_word(row.text) in {"world", "slots"} or _is_world_reply(row):
+            continue
         procedure = fields_of(row.text).get("procedure", "")
         if procedure in _SERVICE:
             return procedure
