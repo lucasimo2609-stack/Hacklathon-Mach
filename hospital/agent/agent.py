@@ -89,6 +89,11 @@ async def main(need: Need, city: City) -> None:
     message = city.inbound
     if message is None:
         return
+    if not message.text and not message.sender.startswith("citizen:"):
+        # No words from an agent or the city (the deploy's conformance probe sends a bare
+        # need, body service/summary): nothing to act on, finish at once. A slow history read
+        # here made the probe miss its 5 s renew window (booking 1.0.17: custody.ack FAIL).
+        return
     text = message.text or need.summary
     role = role_of()
     if clinical(text):
