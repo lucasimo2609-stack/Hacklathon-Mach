@@ -792,6 +792,11 @@ async def _handle(role: str, city: City, message: Message, chat: list[Message]) 
     if message.sender == LEDGER and first_word(message.text) in {"world", "slots", "agenda", "refused", "prescription"}:
         # Diagnosis: the real Ledger formats show up in the console Log tab.
         _LOG.warning("ledger %s: %s", first_word(message.text), message.text[:600].replace("\n", " | "))
+    if message.sender.startswith("city:") and (
+        message.sender != LEDGER
+        or first_word(message.text) not in {"world", "slots", "agenda", "refused", "prescription", "held", "committed"}
+    ):
+        _LOG.warning("city %s: %s", message.sender, message.text[:600].replace("\n", " | "))
     _remember(chat)  # keep the agenda and world copies warm for fast partner answers
     street = _own_street(city)
     if street and _asks_address(message):
@@ -2418,6 +2423,20 @@ def _desk_line(key: str, chat: list[Message]) -> str:
 
 
 _DESK_SAY: dict[str, dict[str, str]] = {
+    "rebook": {
+        "it": "La struttura ha annullato il suo appuntamento, mi dispiace. Le ho già trovato altri "
+              "posti: ecco i più vicini, con lo stesso medico quando possibile. Scelga quello che "
+              "le va meglio e lo blocco subito.",
+        "en": "The clinic called off your appointment, sorry about that. I have already found other "
+              "times for you: here are the closest ones, with the same doctor where possible. "
+              "Pick the one that suits you and I will book it straight away.",
+    },
+    "rebook_wait": {
+        "it": "La struttura ha annullato il suo appuntamento, mi dispiace. Sto già cercando un altro "
+              "posto per lei e le scrivo appena lo trovo.",
+        "en": "The clinic called off your appointment, sorry about that. I am already looking for "
+              "another time for you and will write as soon as I find one.",
+    },
     "offers": {
         "it": "Ecco gli orari disponibili per lei: scelga quello che preferisce. Se le serve "
         "accesso in carrozzina, un interprete o aiuto per arrivarci, ce lo dica.",
@@ -2624,6 +2643,12 @@ async def _desk(
     if "booking.receipt" in kind and message.sender.startswith("agent:"):
         await _forward_receipt(city, message, chat)
         return
+    if not message.sender.startswith("agent:"):
+        booked = _cancelled_booking(message, chat, city.agent_id)
+        if booked:
+            # Level 6 fault: the city (or the citizen, in words) says the booking is gone.
+            await _rebook(city, message, chat, booked[0], booked[1], fixed=fixed)
+            return
     if "cancel" in kind and message.sender.startswith("agent:"):
         await _partner_cancel(city, message, chat, fixed=fixed)
         return
@@ -2801,6 +2826,7 @@ async def _advance_alone(
     else:
         # Our world has no slot list for this procedure at all: the answer is in a partner.
         if procedure and fixed is None and _asked(chat, agent, procedure, 1) and _slots_for(chat, agent, procedure) is None:
+            await _flush_rebook(city, key, citizen, chat)
             await _go_partner(
                 city, chat, citizen, procedure, priority, number, {agent}, message.need_id
             )
@@ -2859,9 +2885,9 @@ async def _advance_alone(
     offer_messages = sum(
         1 for row in chat if row.sender == agent and row.recipient == citizen and _offers_in(row.text)
     )
-    if offer_messages >= _MAX_OFFER_MESSAGES:
+    if offer_messages >= _MAX_OFFER_MESSAGES and key not in _REBOOK_NOTE:
         return
-    taken = taken | declined
+    taken = taken | declined | _REBOOK_EXCLUDE.get(key, set())
     lines = [line for line in world.splitlines() if "slot_id=" in line]
     if rejecting:
         replacing = True  # skip the "already offered" guard below: these are new slots
@@ -2908,6 +2934,10 @@ async def _advance_alone(
     if chosen:
         text = "\n".join(_offer_line(slot, number, priority) for slot in chosen)
         human = _human_times([slot["at"] for slot in chosen], chat)
+        note = _REBOOK_NOTE.pop(key, "")
+        if note:
+            text = f"{note}\n{text}"
+            human = _desk_line("rebook", chat) + " " + human
         if await _say(city, citizen, f"{text}\n{human}{_offers_text(chat, message)}"):
             for slot in chosen:
                 sent.offers.add(slot["slot_id"])
@@ -2926,6 +2956,7 @@ async def _advance_alone(
         return
     # Nothing fits in our ASST: try a partner of the ring (with consent), else the waiting list.
     own = {fields_of(line).get("facility", "") for line in lines} | {agent}
+    await _flush_rebook(city, key, citizen, chat)
     await _go_partner(city, chat, citizen, procedure, priority, number, own, message.need_id)
 
 
@@ -3735,12 +3766,241 @@ async def _forward_receipt(city: City, message: Message, chat: list[Message]) ->
     )
 
 
+# --- level 6: a booking is called off (fault.cancel) --------------------------------------------
+
+_REBOOK_NOTE: dict[str, str] = {}  # need -> cancel line to put on top of the new offers
+_REBOOK_EXCLUDE: dict[str, set[str]] = {}  # need -> slots never to offer again (called off)
+_REBOOKED: set[tuple[str, str]] = set()  # (need, offer) already rebooked by this process
+# The city's graders write to agents about scores: never a cancel notice.
+_GRADERS = {"city:review", "city:clock", "city:audit", "city:emergency"}
+# Ledger answers that are never a cancel notice, even if a slot line says "cancelled".
+_NOT_NOTICE = {"world", "slots", "agenda", "prescription", "rules", "refused", "held", "committed",
+               "checked_in", "reported", "recall", "history", "help"}
+_FAULT_WORDS = re.compile(
+    r"\b(fault\w*|cancel\w*|annullat\w*|disdett\w*|revoked|revocat\w*|saltat\w*|"
+    r"called off|no longer valid|non (e|è) piu valid\w*)\b"
+)
+_CITIZEN_CANCELLED = re.compile(
+    r"(facility_cancel|fault|struttura ha (annullato|cancellato|disdetto)|"
+    r"(mi )?hanno (annullato|cancellato|disdetto)|(e|è|stat\w) (stat\w )?(annullat|cancellat|disdett)\w*|"
+    r"appuntamento (e|è )?saltato|(was|has been|got) (cancell?ed|called off)|"
+    r"(cancell?ed|called off) my (appointment|booking))"
+)
+
+
+def _offer_of_booking(chat: list[Message], agent: str, booking_id: str) -> str:
+    """The offer a booking came from: from the receipt row, else the confirm before it."""
+
+    token = f"booking_id={booking_id}"
+    for row in chat:
+        if token in row.text.split() and "booking.receipt" in words(row.text):
+            found = fields_of(row.text).get("offer_id", "")
+            if found:
+                return found
+    last = ""
+    for row in chat:
+        if "confirm" in words(row.text) and row.sender != agent:
+            last = fields_of(row.text).get("offer_id", last)
+        if token in row.text.split():
+            break
+    return last
+
+
+def _receipt_sent(chat: list[Message], agent: str, citizen: str, offer_id: str) -> bool:
+    """We forwarded a receipt to the citizen after they confirmed this offer."""
+
+    confirmed = False
+    for row in chat:
+        if row.sender == citizen and "confirm" in words(row.text) and f"offer_id={offer_id}" in row.text.split():
+            confirmed = True
+        if confirmed and row.sender == agent and row.recipient == citizen and "booking.receipt" in words(row.text):
+            return True
+    return False
+
+
+def _cancelled_booking(message: Message, chat: list[Message], agent: str) -> tuple[str, str] | None:
+    """(offer_id, booking_id) of the citizen's booking when the city or the citizen says it was
+    called off by the facility; None otherwise (a citizen turning offers down is not this)."""
+
+    citizen = _citizen(chat)
+    if not citizen:
+        return None
+    receipts = [
+        row for row in chat
+        if row.sender == agent and row.recipient == citizen and "booking.receipt" in words(row.text)
+    ]
+    if not receipts:
+        return None
+    text = _fold(message.text)
+    fields = fields_of(message.text)
+    if message.sender.startswith("citizen:"):
+        if not _CITIZEN_CANCELLED.search(text) and "facility" not in fields.get("reason", ""):
+            return None
+    elif (
+        message.sender == agent
+        or message.sender in _GRADERS
+        or not _FAULT_WORDS.search(text)
+        or _canon(message.text) in _NOT_NOTICE
+    ):
+        return None
+    booking_id = fields.get("booking_id", "")
+    if booking_id and not any(f"booking_id={booking_id}" in row.text.split() for row in receipts):
+        return None  # another booking, not the one we made in this case
+    booking_id = booking_id or fields_of(receipts[-1].text).get("booking_id", "")
+    offer_id = _offer_of_booking(chat, agent, booking_id) if booking_id else ""
+    if not offer_id:
+        return None
+    if _we(chat, agent, f"offer_id={offer_id}", to=citizen, word="cancel") or any(
+        offer_id in note for note in _REBOOK_NOTE.values()
+    ):
+        return None  # already rebooking this one
+    return offer_id, booking_id
+
+
+async def _rebook(
+    city: City, message: Message, chat: list[Message], offer_id: str, booking_id: str, *, fixed: str | None
+) -> None:
+    """MACH-1.2 REBOOK: one message to the citizen with the cancel on top and new offers below."""
+
+    agent = city.agent_id
+    citizen = _citizen(chat)
+    if not citizen or _we(chat, agent, f"offer_id={offer_id}", to=citizen, word="cancel"):
+        return
+    key = message.need_id or message.msg_id
+    if (key, offer_id) in _REBOOKED:
+        return
+    _REBOOKED.add((key, offer_id))
+    held = _our_offer(chat, agent, offer_id)
+    note = f"cancel offer_id={offer_id}" + (f" booking_id={booking_id}" if booking_id else "") + " reason=facility_cancelled"
+    _REBOOK_NOTE[key] = note
+    if held.get("slot_id"):
+        _REBOOK_EXCLUDE.setdefault(key, set()).add(held["slot_id"])
+    _LOG.warning("rebook %s: %s", key, message.text[:300].replace("\n", " | "))
+    # A synthetic turn (not the citizen's words): never read as the citizen turning offers down.
+    turn = Message(
+        type=message.type, sender=LEDGER, msg_id=message.msg_id, need_id=message.need_id,
+        conversation_id=message.conversation_id, body={"text": note}, recipient=agent,
+    )
+    try:
+        await _advance(city, turn, chat, fixed=fixed, replacing=True)
+    finally:
+        left = _REBOOK_NOTE.pop(key, "")
+    if left:
+        # No new slot of ours in the same message: the citizen still hears it from us now.
+        await _say(city, citizen, f"{left} " + _desk_line("rebook_wait", chat))
+
+
+async def _flush_rebook(city: City, key: str, citizen: str, chat: list[Message]) -> None:
+    """No new slot of ours: tell the citizen the booking is gone BEFORE the partner search."""
+
+    note = _REBOOK_NOTE.pop(key, "")
+    if note:
+        await _say(city, citizen, f"{note} " + _desk_line("rebook_wait", chat))
+
+
+def _cancel_notice(message: Message, chat: list[Message], agent: str) -> str:
+    """Facility side: booking_id of one of our bookings that the city says is called off."""
+
+    if message.sender.startswith(("citizen:", "agent:")) or message.sender in _GRADERS or message.sender == agent:
+        return ""
+    if not _FAULT_WORDS.search(_fold(message.text)):
+        return ""
+    if _canon(message.text) in _NOT_NOTICE:
+        return ""
+    fields = fields_of(message.text)
+    booking_id = fields.get("booking_id", "")
+    if booking_id:
+        return booking_id
+    slot = fields.get("slot_id", "")
+    for row in chat:
+        if row.sender == LEDGER and _canon(row.text) == "committed":
+            found = fields_of(row.text)
+            if not slot or found.get("slot_id") == slot or _hold_slot(chat, agent, found.get("hold_id", "")) == slot:
+                booking_id = found.get("booking_id", booking_id)
+    return booking_id
+
+
+async def _on_booking_cancelled(city: City, message: Message, chat: list[Message], booking_id: str) -> None:
+    """MACH-1.2 REBOOK, facility side: tell whoever booked, at once, with alternatives below."""
+
+    agent = city.agent_id
+    committed = next(
+        (row for row in chat if row.sender == LEDGER and _canon(row.text) == "committed"
+         and f"booking_id={booking_id}" in row.text.split()),
+        None,
+    )
+    fields = fields_of(committed.text) if committed else {}
+    slot = fields.get("slot_id") or _hold_slot(chat, agent, fields.get("hold_id", "")) or fields_of(message.text).get("slot_id", "")
+    if not slot:
+        _LOG.warning("cancel notice without our booking: %s", message.text[:300].replace("\n", " | "))
+        return
+    sender, _, _ = _booking_of(chat, agent, slot)
+    target = sender or _citizen(chat)
+    if not target or _we(chat, agent, f"booking_id={booking_id}", to=target, word="cancel"):
+        return
+    offer = _offer_to(chat, agent, target, slot)
+    offer_id = offer.get("offer_id", "")
+    if not offer_id:
+        for row in chat:
+            if "confirm" in words(row.text) and f"slot_id={slot}" in row.text.split():
+                offer_id = fields_of(row.text).get("offer_id", offer_id)
+    request_id = offer.get("request_id", "")
+    procedure = offer.get("procedure", "") or _visit_procedure(chat) or ""
+    priority = offer.get("priority") or None
+    doctor = offer.get("doctor_id", "")
+    head = f"cancel reason=facility_cancelled booking_id={booking_id}"
+    head += (f" offer_id={offer_id}" if offer_id else "") + f" slot_id={slot}"
+    head += f" request_id={request_id}" if request_id else ""
+    lines = [head]
+    world = _world_now(procedure) if procedure else None
+    now = _agenda_now()
+    if procedure and (world is None or now is None):
+        if not _exact(chat, agent, "agenda"):
+            await _say(city, LEDGER, "agenda")
+        await _say(city, LEDGER, f"world procedure={procedure} page=1")
+        chat = await _until(city, message.need_id, chat, lambda rows: _has_agenda(rows) and _latest_slots(rows) is not None)
+        _remember(chat)
+        world = _latest_slots(chat)
+        now = _agenda_now()
+    if world and now is not None:
+        mine = {agent, _ROLE_NAMES.get(role_of(), "")} - {""}
+        rows = [line for line in world.splitlines() if "slot_id=" in line]
+        free = [
+            s for s in fitting(rows, now=now, priority=priority, lang="it", procedure=procedure)
+            if s.get("facility", "") in mine and s.get("slot_id") != slot and not _recently_held(s.get("slot_id", ""))
+        ]
+        # Same doctor first (same language and gender, so still the citizen's preference),
+        # then the earliest; at most 3 lines, as MACH-1.2 asks.
+        free.sort(key=lambda s: (s.get("doctor_id") != doctor, s.get("at", "")))
+        for alt in free[:3]:
+            line = _offer_line({**alt, "facility": agent}, None, priority).replace("+00:00", "")
+            lines.append(f"{line} request_id={request_id}" if request_id else line)
+            if target.startswith("agent:"):
+                _note_partner_offer(alt.get("slot_id", ""), target)
+    if target.startswith("citizen:"):
+        lines.append(_desk_line("rebook" if len(lines) > 1 else "rebook_wait", chat))
+    else:
+        lines.append("Il posto prenotato è saltato: sotto le alternative più vicine, con lo stesso medico quando possibile")
+    await _say(city, target, "\n".join(lines))
+
+
 async def _partner_cancel(
     city: City, message: Message, chat: list[Message], *, fixed: str | None
 ) -> None:
     fields = fields_of(message.text)
     offer_id = fields.get("offer_id", "")
     citizen = _citizen(chat)
+    if not offer_id and fields.get("booking_id"):
+        offer_id = _offer_of_booking(chat, city.agent_id, fields["booking_id"])
+    if (
+        citizen
+        and offer_id
+        and "PRESCRIPTION_EXPIRED" not in message.text.upper()
+        and _receipt_sent(chat, city.agent_id, citizen, offer_id)
+    ):
+        # The facility called off a booking the citizen already holds: rebook at once.
+        await _rebook(city, message, chat, offer_id, fields.get("booking_id", ""), fixed=fixed)
+        return
     if citizen and "PRESCRIPTION_EXPIRED" in message.text.upper():
         # Rule P1 hit at commit: no new offers on a dead prescription, ask the renewal.
         if offer_id and not _we(chat, city.agent_id, f"offer_id={offer_id}", to=citizen, word="cancel"):
@@ -4111,6 +4371,10 @@ async def _facility(
 ) -> None:
     head = _canon(message.text) if message.sender == LEDGER else first_word(message.text)
     kind = words(message.text)
+    notice = _cancel_notice(message, chat, city.agent_id)
+    if notice:
+        await _on_booking_cancelled(city, message, chat, notice)
+        return
     if message.sender == LEDGER and head == "held":
         await _on_held(city, message, chat)
     elif message.sender == LEDGER and head == "committed":

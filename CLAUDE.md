@@ -61,9 +61,19 @@ Backward compatible with MACH-1 / 1.1. Full text: `MACH-1.2.md` on Discord. What
   criterion, marked `relaxed=days|gender|lang`. The booking centre never shows `relaxed`,
   `reserve`, `doctor_lang`, `doctor_gender` to the citizen: it says in Italian what changes
   and asks if it is fine.
-- **REBOOK (L6, todo):** a facility that cancels sends `cancel reason=facility_cancelled
-  booking_id=…` plus replacement offers in the same message; a `need.request` with
-  `rebook_of=` goes first (answer within 5 s).
+- **REBOOK (L6, done):** the real `fault.cancel` format is unknown until it fires, so every
+  path is covered and logged (`city <sender>: …` and `rebook <need>: …` warnings in the Log
+  tab: read them at the first fault and adjust).
+  - Facility gets a city/Ledger notice about one of our bookings → ONE message to whoever
+    booked: `cancel reason=facility_cancelled booking_id= offer_id= slot_id= request_id=`
+    + up to 3 alternatives (same doctor first, inside the priority window) + Italian line.
+  - Booking centre gets that cancel from a facility (ours or a partner, `offer_id` or only
+    `booking_id`), a city notice, or the citizen saying it in words → ONE message to the
+    citizen: cancel line on top, new offers below, «La struttura ha annullato…». No new slot
+    of ours → the cancel line first, then the partner search / waiting list.
+  - Idempotent per (need, offer); graders (`city:review/clock/audit/emergency`) and Ledger
+    `world/agenda/…` replies are never notices. Consultorio rebooks the citizen directly.
+  - Not done yet: `rebook_of=` priority for partner requests (we already answer at once).
 - **Idempotency (L7, todo):** same `request_id` → same offers; same `offer_id` confirm → same
   receipt, never a second hold; never a receipt without a successful `commit` (−2).
 - **Soft lock (L7):** a slot offered to one `request_id` is not offered to another for 60 real
@@ -132,6 +142,8 @@ $PY -I tests/h_alt.py hospital/agent tests/h_desk.py
 $PY -I tests/mach12.py hospital/agent hospital    # MACH-1.2: relaxed offers, days/gender criteria
 $PY -I tests/gp_review.py gp/agent         # personal reply, collaboration said, earliest slot
 $PY -I tests/chaos.py hospital/agent       # 1,275 odd/failing turns: no crash, never silent
+$PY -I tests/bc_rebook.py booking_centre/agent tests/bc_test.py   # L6: cancel + new offers in ONE message
+$PY -I tests/h_rebook.py hospital/agent hospital  # L6 facility side: cancel + alternatives
 ```
 
 All must pass before any deploy.
