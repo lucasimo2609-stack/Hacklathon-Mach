@@ -4822,8 +4822,12 @@ def _is_partner_request(message: Message) -> bool:
     """Another team's booking centre asking for slots. Teams phrase it differently: the act
     word need.request, or just the search tokens (procedure= / service_type=)."""
 
-    if not message.sender.startswith("agent:") or message.sender in _TEAM:
+    if not message.sender.startswith("agent:"):
         return False
+    if message.sender in _TEAM:
+        # Our own booking centre asks us directly when the Ledger is slow (source=own_asst).
+        # This branch used to drop it, so the "fast own channel" never answered in the race.
+        return message.sender == _BC_AGENT and "source=own_asst" in (message.text or "")
     kind = words(message.text)
     if kind & _NOT_A_REQUEST:
         return False
@@ -5032,7 +5036,9 @@ async def _partner_request(
     _remember(chat)
     now = _agenda_now()
     own = "source=own_asst" in (message.text or "")
-    world = _world_now(procedure, _OWN_TTL if own else _WORLD_TTL)
+    # Our own booking centre asks us because the Ledger is slow: answer at once from a copy
+    # up to 30 min old (21 Nov: 36 agenda hours of a 48 h window burnt before the first offer).
+    world = _world_now(procedure, _STALE_TTL if own else _WORLD_TTL)
     if now is None or world is None:
         # No fresh copy: acknowledge right away, then read the Ledger.
         tail = f" request_id={request_id}" if request_id else ""
