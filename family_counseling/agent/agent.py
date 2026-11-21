@@ -3251,6 +3251,12 @@ async def _advance_alone(
             not _asked(chat, agent, procedure, 1) or _pass == 1
         ):
             await _say(city, LEDGER, f"world procedure={procedure} page=1")
+        if world is None and _pass == 0 and fixed is None:
+            # Ask our own facility at once, together with the Ledger (was only after ~12 s of
+            # waiting): it answers from its slot copy in milliseconds, and every minute of a
+            # slow Ledger burns an agenda hour of the citizen's window (21 Nov W01QQQ: 38 of 57
+            # failed cases waited 17 min and then said "no slot in our ASST"). Once per case.
+            await _ask_own_facility(city, chat, procedure, priority, message.need_id)
         wanted = procedure
         chat = await _until(
             city,
@@ -5125,7 +5131,8 @@ async def _partner_request(
             # having seen a single slot, and they dropped us. Keep reading the case; then fall
             # back on a slot copy up to 30 min old (a taken slot fails at hold, with alternatives).
             # Load-aware, and no long wait at all for a request that already queued too long.
-            budget = 0.0 if hurry else _budget(min(_PARTNER_LEDGER_WAIT, _PULL_PAUSE * 600))
+            # Our own booking waits for the Ledger itself: answer it with what we have.
+            budget = 0.0 if (hurry or own) else _budget(min(_PARTNER_LEDGER_WAIT, _PULL_PAUSE * 600))
             poll = min(_HOLD_POLL, max(_PULL_PAUSE * 20, 0.001))
             start = time.monotonic()
             _INFLIGHT += 1
@@ -5198,6 +5205,12 @@ async def _partner_request(
             _note_partner_offer(s.get("slot_id", ""), partner)
     if not slots:
         tail = f" request_id={request_id}" if request_id else ""
+        if own and world is None:
+            # We never saw our own slot list (Ledger silent, no copy): "no_availability" made
+            # our booking centre tell the citizen "no slot in our ASST" and search partners.
+            # Say we do not know yet; the booking keeps waiting for the Ledger's answer.
+            await _say(city, partner, f"cancel reason=ledger_slow procedure={procedure}{tail}")
+            return
         await _say(city, partner, f"cancel reason=no_availability procedure={procedure}{tail}")
         return
     offers = []

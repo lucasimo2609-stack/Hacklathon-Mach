@@ -13,6 +13,8 @@ def check(name, ok, info=""):
 def offers_msg(c):
     return next((t for to, t in c.out if to == CIT and "offer offer_id=" in t), "")
 
+# 21 Nov: the booking keeps 8 h ahead for B/D (U unchanged): Monday 10:30 at 08:00 is too close,
+# the first time offered is Tuesday 10:30.
 async def main():
     # 1. Readable dates + weekday, tokens untouched
     c = FakeCity(slots=own); await turn(c, CIT, "vorrei prenotare prescription_number=rx-1 lang=it")
