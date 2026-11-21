@@ -9,6 +9,7 @@ citizens read the act word and ``key=value`` tokens (ADR-110).
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import os
 import re
@@ -672,12 +673,119 @@ def _notice_lang(chat: list[Message]) -> str:
 
 
 async def handle(role: str, city: City, message: Message, chat: list[Message]) -> None:
+    token = _TURN_TO.set(set())
     try:
         await _handle(role, city, message, chat)
+        if message.sender.startswith("citizen:") and message.sender not in _TURN_TO.get():
+            await _never_silent(role, city, message, chat)
     except OutOfScope:
         raise  # the SDK's own decline path
     except Exception as error:  # noqa: BLE001 - the safety net, by design
         await _safety_net(city, message, chat, error)
+    finally:
+        _TURN_TO.reset(token)
+
+
+# Who this turn wrote to: the "never silent" check below reads it after the role's handler.
+_TURN_TO: contextvars.ContextVar[set[str]] = contextvars.ContextVar("turn_to", default=set())
+
+_QUIET = {
+    "booking_wait": {
+        "it": "Perfetto: sto registrando la prenotazione con la struttura, la ricevuta arriva "
+        "tra pochi secondi.",
+        "en": "Great: I am registering your booking with the facility, the receipt arrives in a "
+        "few seconds.",
+        "es": "Perfecto: estoy registrando la reserva con el centro, el comprobante llega en "
+        "unos segundos.",
+        "fr": "Parfait : j'enregistre la réservation auprès de la structure, le justificatif "
+        "arrive dans quelques secondes.",
+    },
+    "ledger_slow": {
+        "it": "Sto verificando con il registro regionale, che in questo momento è lento: le "
+        "mando gli orari appena risponde. Se tra un minuto non ha notizie, mi riscriva.",
+        "en": "I am checking with the regional register, which is slow right now: I will send "
+        "you the times as soon as it answers. If you hear nothing within a minute, write again.",
+        "es": "Estoy consultando el registro regional, que ahora va lento: le envío los horarios "
+        "en cuanto responda. Si en un minuto no sabe nada, escríbame de nuevo.",
+        "fr": "Je vérifie auprès du registre régional, lent en ce moment : je vous envoie les "
+        "horaires dès sa réponse. Sans nouvelles dans une minute, réécrivez-moi.",
+    },
+    "gp_wait": {
+        "it": "Sto verificando la sua ricetta sul registro regionale: le rispondo appena possibile. "
+        "Se intanto mi dice cosa sente, preparo tutto io.",
+        "en": "I am checking your number on the regional register and will answer as soon as "
+        "possible. Meanwhile, tell me what you feel and I will set everything up.",
+        "es": "Estoy comprobando su número en el registro regional y le respondo enseguida. "
+        "Mientras tanto, dígame qué siente.",
+        "fr": "Je vérifie votre numéro sur le registre régional et je vous réponds au plus vite. "
+        "En attendant, dites-moi ce que vous ressentez.",
+    },
+    "desk_wait": {
+        "it": "Il registro è lento a rispondere: la registro appena possibile, resti pure in "
+        "sala d'attesa.",
+        "en": "The register is slow to answer: I will register you as soon as possible, please "
+        "stay in the waiting room.",
+        "es": "El registro tarda en responder: le registro en cuanto pueda, quédese en la sala.",
+        "fr": "Le registre tarde à répondre : je vous enregistre dès que possible, restez en "
+        "salle d'attente.",
+    },
+    "desk_choose": {
+        "it": "Per scegliere o cambiare l'orario scriva al centro prenotazioni: qui allo "
+        "sportello la registro all'arrivo, con il codice della prenotazione.",
+        "en": "To choose or change the time, write to the booking centre: here at the desk I "
+        "register you on arrival, with your booking code.",
+        "es": "Para elegir o cambiar la hora escriba al centro de reservas: aquí en el mostrador "
+        "le registro al llegar, con el código de la reserva.",
+        "fr": "Pour choisir ou changer l'horaire, écrivez au centre de réservation : ici à "
+        "l'accueil je vous enregistre à l'arrivée, avec le code de réservation.",
+    },
+}
+
+
+def _quiet_line(key: str, lang: str) -> str:
+    table = _QUIET[key]
+    return table.get(lang, table["en"])
+
+
+async def _never_silent(role: str, city: City, message: Message, chat: list[Message]) -> None:
+    """The role's handler wrote nothing to this citizen. Unless another turn already answered
+    or the silence is part of the choice (a burst of cancels on offers in front of them), send
+    one line that fits the moment: a citizen left without an answer costs a passive -1."""
+
+    agent = city.agent_id
+    try:
+        fresh = await city.history(need_id=message.need_id)
+    except CapError:
+        fresh = chat
+    if _answered(fresh, agent, message):
+        return
+    kind = words(message.text)
+    fields = fields_of(message.text)
+    if "cancel" in kind and _our_offer(fresh, agent, fields.get("offer_id", "")):
+        return  # one cancel of a burst on our offers: the burst is answered once, elsewhere
+    lang = _lang(fresh) if role != "gp" else _speaks_as(message.text or "")
+    if role == "gp":
+        line = _quiet_line("gp_wait", lang) if fields.get("prescription_number") else _clarify(message.text or "")
+    elif role in ("booking_centre", "family_counseling"):
+        offer = _our_offer(fresh, agent, fields.get("offer_id", ""))
+        if "confirm" in kind and offer:
+            line = _quiet_line("booking_wait", lang)
+        elif role == "booking_centre" and not _number(fresh):
+            if _we(fresh, agent, "fields=prescription_number", to=message.sender, word="data.request"):
+                line = _desk_line("number", fresh)
+            else:
+                line = "data.request purpose=booking fields=prescription_number " + _desk_line("number", fresh)
+        else:
+            line = _quiet_line("ledger_slow", lang)
+    else:
+        if "confirm" in kind or "cancel" in kind:
+            line = _quiet_line("desk_choose", lang)
+        elif "checkin" in kind or _arrival(message.text or ""):
+            line = _quiet_line("desk_wait", lang)
+        else:
+            line = _desk_line("desk", fresh)
+    _LOG.warning("care.never_silent role=%s text=%s", role, (message.text or "")[:80])
+    await _say(city, message.sender, line)
 
 
 async def _handle(role: str, city: City, message: Message, chat: list[Message]) -> None:
@@ -816,6 +924,7 @@ async def _say(city: City, to: str, text: str) -> bool:
         await city.say(to, text)
     except CapError:
         return False
+    _TURN_TO.get().add(to)
     return True
 
 

@@ -130,6 +130,8 @@ $PY -I tests/h_test.py hospital/agent hospital
 $PY -I tests/h_desk.py hospital/agent hospital
 $PY -I tests/h_alt.py hospital/agent tests/h_desk.py
 $PY -I tests/mach12.py hospital/agent hospital    # MACH-1.2: relaxed offers, days/gender criteria
+$PY -I tests/gp_review.py gp/agent         # personal reply, collaboration said, earliest slot
+$PY -I tests/chaos.py hospital/agent       # 1,275 odd/failing turns: no crash, never silent
 ```
 
 All must pass before any deploy.
