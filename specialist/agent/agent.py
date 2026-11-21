@@ -112,6 +112,9 @@ async def main(need: Need, city: City) -> None:
         return
     text = message.text or need.summary
     role = role_of()
+    if role == "gp" and message.sender == LEDGER and first_word(text) not in _GP_LEDGER_WORK:
+        _gp_echo(message)
+        return
     if clinical(text):
         # "Ho mal di schiena, che antidolorifico prendo?" still deserves its protocol
         # prescription: the GP serves the symptom and declines only the medicine question.
@@ -1519,22 +1522,57 @@ def _learn_protocols(text: str) -> int:
 
 
 async def _read_protocols(city: City, need_id: str | None, chat: list[Message]) -> None:
-    """Once per process, after the citizen has been answered: ask the Ledger's protocol rows."""
+    """Once per process, after the citizen has been answered: ask the Ledger's protocol rows.
+    Not waited on (it held the first turn up to 6 s): the answer is learned in _gp_echo."""
 
     global _PROTOCOL_ASKED
     if _PROTOCOL_ASKED:
         return
     _PROTOCOL_ASKED = True
-    seen = len([row for row in chat if row.sender == LEDGER])
-    if not await _say(city, LEDGER, "world"):
+    await _say(city, LEDGER, "world")
+
+
+# Ledger answers the GP must act on (renewal look-up, its own prescribe); every other Ledger
+# line to the GP is an echo of a look-up and is handled without reading the case.
+_GP_LEDGER_WORK = frozenset({"prescription", "prescribed", "refused"})
+_GP_WORLD_MAX_AGE = 600.0  # seconds a slot copy may be quoted to a citizen
+_GP_WORLD_EVERY = 120.0  # at most one slot query per procedure in this window
+_GP_WORLD_ASKED: dict[str, float] = {}
+
+
+def _gp_echo(message: Message) -> None:
+    """A Ledger echo to the GP: keep the slot copy and the clock, learn protocol rows."""
+
+    _remember([message])
+    if "symptom_code=" in message.text:
+        _learn_protocols(message.text)
+
+
+async def _refresh_gp_world(city: City, procedure: str) -> None:
+    last = _GP_WORLD_ASKED.get(procedure)
+    if last is not None and time.monotonic() - last < _GP_WORLD_EVERY:
         return
-    rows = await _until(
-        city, need_id, chat,
-        lambda rows: len([row for row in rows if row.sender == LEDGER]) > seen,
-    )
-    for row in rows:
-        if row.sender == LEDGER and "symptom_code=" in row.text:
-            _learn_protocols(row.text)
+    _GP_WORLD_ASKED[procedure] = time.monotonic()
+    await _say(city, LEDGER, f"world procedure={procedure} page=1")
+    if _agenda_now() is None:
+        await _say(city, LEDGER, "agenda")
+
+
+def _cached_first_slot(procedure: str, priority: str, said: str) -> str:
+    """The earliest slot that fits this citizen from the GP's slot copy (no Ledger call), as
+    an ISO time, or "" when the copy is missing or older than _GP_WORLD_MAX_AGE."""
+
+    hit = _WORLD_SEEN.get(procedure)
+    now = _agenda_now()
+    if hit is None or now is None or time.monotonic() - hit[0] > _GP_WORLD_MAX_AGE:
+        return ""
+    lang = _lang_asked(said) or _script_lang(said) or _speaks_as(said)
+    lines = [line for line in hit[1].splitlines() if "slot_id=" in line]
+    try:
+        slots = fitting(lines, now=now, priority=priority, lang=lang, procedure=procedure)
+    except Exception:  # never let the copy stop a prescription
+        return ""
+    return slots[0].get("at", "") if slots else ""
 
 
 def _clarify(text: str) -> str:
@@ -1650,28 +1688,22 @@ async def _gp(city: City, message: Message, chat: list[Message]) -> None:
     # Speed first (live journeys showed 5-9 min replies when the city was loaded: every extra
     # call before this line waited in the queue). The citizen gets the prescription right after
     # the Ledger write; the message says the booking centre is being told NOW (true: it is the
-    # very next call), so the reviewer still reads the collaboration.
+    # very next call), so the reviewer still reads the collaboration. The earliest slot comes
+    # from the GP's slot copy: no waiting (the waited look-up found a slot 0 times in 44 live
+    # replies on 21 Nov, the Ledger answering minutes later).
+    first = _cached_first_slot(procedure, priority, said)
     await _say(
         city,
         message.sender,
         f"prescription {token} procedure={procedure} priority={priority} "
-        f"{_rx_note(message.text, priority, needs, code=code, said=said, told=True)}",
+        f"{_rx_note(message.text, priority, needs, code=code, said=said, told=True, first=first)}",
     )
     # Collaboration: tell the booking centre, unasked (language, shareable needs; no citizen
     # id, no symptom).
     await _notify_booking(city, chat, number, procedure, priority, said, needs)
-    # Proactivity, never at the citizen's expense: a hard-capped look-up of the earliest slot,
-    # sent as a short second line only when found in time.
-    try:
-        first = await asyncio.wait_for(
-            _first_slot(city, message.need_id, chat, procedure, priority, said), timeout=_FIRST_SLOT_CAP
-        )
-    except (asyncio.TimeoutError, Exception):
-        first = ""
-    lang = _speaks_as(message.text)
-    when = _human_when(first, lang) if first and lang in _FIRST else ""
-    if when:
-        await _say(city, message.sender, f"{token} {_FIRST[lang].format(when=when)}")
+    # Keep the slot copy warm for the next citizens and read the protocol table once: both are
+    # sent without waiting; the Ledger's answers open their own (instant) turns, see _gp_echo.
+    await _refresh_gp_world(city, procedure)
     await _read_protocols(city, message.need_id, chat)
 
 
