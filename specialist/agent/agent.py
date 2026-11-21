@@ -1075,7 +1075,9 @@ _RARE_BY_ASST: dict[str, str] = {
     "brera": "fa", "isola": "tl", "ortica": "wo", "greco": "si", "bicocca": "ti", "lambrate": "ja",
     "gorla": "sq", "forlanini": "de", "citta-studi": "tr", "cittastudi": "tr",
 }
-_DISTRICT_BY_LANG: dict[str, int] = {"ro": 9, "ur": 2, "fr": 3, "fa": 7, "tl": 8, "wo": 6}
+_DISTRICT_BY_LANG: dict[str, int] = {
+    "ro": 9, "ur": 2, "fr": 3, "fa": 7, "tl": 8, "wo": 6, "de": 5, "sq": 8, "tr": 2, "ja": 3, "si": 7, "ti": 4,
+}
 # Agents of other teams listed on Discord (team -> ids). Add every list that is posted.
 _TRUSTED_AGENTS: set[str] = {
     # asst-precotto, team Toros (MACH-1.2 ring list)
@@ -1158,6 +1160,57 @@ _PARTNER_AGENTS: dict[str, dict[str, str]] = {
         "family_counseling.gynecology": "agent:ccjzqm7yekwx",
     },
 }
+
+# The whole ring, from the city's own map (projectnandaitaly.ai /v1/scoreboard/map, 21 Nov 01:45):
+# ASST -> (team, district, booking_centre, gp, hospital, specialist, consultorio).
+_RING: dict[str, tuple[str, int, str, str, str, str, str]] = {
+    "nord": ("agentic-paguri", 2, "agent:psxp8bh1feaa", "agent:wwxaphfb5pfh", "agent:gpr1zqe343gb", "agent:zand0f57ec1j", "agent:ccjzqm7yekwx"),
+    "est": ("ai-capito", 3, "agent:n8geakhhcprc", "agent:xjsdqxvj3x59", "agent:r8njm9a6c7pv", "agent:gpwmb45gggme", "agent:hvycshaebezp"),
+    "sud": ("bbc", 4, "agent:p56k8h29kc45", "agent:v4y8p7h8gkzw", "agent:p90cbsk3n9e6", "agent:n0p2dwznf4mc", "agent:kx0j48fa0epp"),
+    "ovest": ("bhealth", 5, "agent:pewepg7h3c5g", "agent:bq7e62g3kkz3", "agent:darwa6412gz0", "agent:fa0sw3wwn1d4", "agent:r7rgp7mdwg8y"),
+    "centro": ("buildframe", 6, "agent:y6hxsd766sys", "agent:jmqwr12vy2j6", "agent:r8yprrs0e8be", "agent:dqfw9nh15dn4", "agent:pv3a0t3tyqdq"),
+    "brera": ("cmdccmdv", 7, "agent:q6s5nm3h5dq5", "agent:xbmtvn6jzvyg", "agent:ndrnnjwxttmb", "agent:fjmvabg58gh0", "agent:cj1jfac4ev86"),
+    "isola": ("diuo", 8, "agent:sphwpc5tg4p9", "agent:cxvqv5qztz70", "agent:d6cxxmh767k3", "agent:etpwrfmfa8hm", "agent:mkfzagfe8jtt"),
+    "navigli": ("epica", 9, "agent:jgy1dj2sw2ew", "agent:dn90g1skkx0f", "agent:gezf38x5940y", "agent:s2tevpn8zkcj", "agent:drchwbffymha"),
+    "porta-romana": ("gruppo-2", 1, "agent:z6pbm2a7vf36", "agent:d6c308wmh6ky", "agent:p2hwz5xyjrwz", "agent:a88btdp00ymw", "agent:bx7r8th27v1f"),
+    "citta-studi": ("it-s-a-feature-not-a-bug", 2, "agent:hwfrwj893121", "agent:pp83zdrg8vhe", "agent:ytprhckwyw4t", "agent:sc25kab6cgde", "agent:p5sq1njyjr47"),
+    "lambrate": ("ltf-jecatt", 3, "agent:gdrf9b9kxxss", "agent:c2ewegr2ea3v", "agent:nanpr5mgm2py", "agent:pky3vqyqbepa", "agent:atp772whjkgd"),
+    "bicocca": ("p4radigm", 4, "agent:ez8cb7j167p2", "agent:rng5wcrzvhsj", "agent:bb01ggxymm05", "agent:sh35cbsy287d", "agent:nkh372rd16yq"),
+    "niguarda": ("polimi", 5, "agent:fn64xfq2jft4", "agent:fddgaqmp6kb0", "agent:jdj692g4145e", "agent:jmjfst55vgjz", "agent:mm18nddkfc5w"),
+    "bovisa": ("prompt-soccorso", 6, "agent:vgtmj5nqfkxj", "agent:h82xpx3rkn9e", "agent:gxq3vzgt3h5t", "agent:tty8erdj6t41", "agent:txar5994gbkj"),
+    "san-siro": ("psq-quelli-veri", 7, "agent:tnzkhsa62kn0", "agent:qsbsfjytc3y5", "agent:k2nwktpp02xx", "agent:yk37jqcnc1r5", "agent:sdca2w4p9f8z"),
+    "baggio": ("quantvengers", 8, "agent:jastt2eeekcv", "agent:ny08j7bvs7jw", "agent:t40mr7xsn2wh", "agent:t3ktav4yrxvb", "agent:pd5th2nkb31q"),
+    "lorenteggio": ("raspberry", 9, "agent:qtjne8symjas", "agent:w2qsptc9qqhg", "agent:tmt0bcv0st1f", "agent:n9bf9y6670hp", "agent:mcppmrbjvxag"),
+    "giambellino": ("red-agent", 1, "agent:cdc7x6m21nj6", "agent:c32jyk0cyan7", "agent:h6r1v45esk77", "agent:hnpe58epeyh1", "agent:bzs050xacs1m"),
+    "barona": ("sciur-agent", 2, "agent:vdmz874c65kp", "agent:w9easgp707bn", "agent:w2str91zrrbq", "agent:qg7rvp6ktyne", "agent:hdnz4xe1c8d2"),
+    "corvetto": ("scuola-di-atene", 3, "agent:yzcs4p44ep39", "agent:hkrtm1gzjb24", "agent:x0vr9rbwpesr", "agent:h8425ac7btd8", "agent:p0n57t7vtpq0"),
+    "rogoredo": ("spilucchini", 4, "agent:ejfzvz4tdagq", "agent:hwgn012k70gh", "agent:fnxy73v47n9g", "agent:s5sevkc5291w", "agent:jet0tz755hvf"),
+    "forlanini": ("synpolis", 5, "agent:eg6p3m77svxv", "agent:b0pk7g42fcsn", "agent:aycbxayckhrd", "agent:zeahjp9bp2an", "agent:yr8hjc5q7n98"),
+    "ortica": ("t-5-gin-tokens", 6, "agent:geyjmp26tajh", "agent:ega0tzcy6za8", "agent:vs1bs4485dcn", "agent:cgj1c2mf1dx0", "agent:d0kkschyjrdq"),
+    "greco": ("tartufi-pazzi", 7, "agent:h3n6kfd18r3g", "agent:bmrcsmqq6at2", "agent:xtj1dk9x3qej", "agent:q18es2d82f8r", "agent:pxvd2kk2yx5j"),
+    "gorla": ("the-promptfather-s", 8, "agent:sbdpbpqz5sxe", "agent:ck9w60ejwnvw", "agent:m6py14a1ej77", "agent:h6krzxx6es83", "agent:yg8debxe3x0p"),
+    "precotto": ("toros", 9, "agent:ser7es7thgwf", "agent:n4yjr7kjbmrx", "agent:s1twcdzg3296", "agent:f2s88vwd3jnf", "agent:nf9pqsgzrwm0"),
+}
+_RING_SERVICES = ("hospital.physiatry", "specialist_care.cardiology", "family_counseling.gynecology")
+# Every agent of every other ASST is a known ring member; facilities are always asked.
+_TRUSTED_AGENTS.update(
+    agent_id for name, row in _RING.items() if name != "giambellino" for agent_id in row[2:] if agent_id
+)
+_ASST_BY_AGENT: dict[str, str] = {
+    agent_id: name for name, row in _RING.items() for agent_id in row[2:] if agent_id
+}
+for _name, _row in _RING.items():
+    if _name == "giambellino":
+        continue
+    for _service, _agent_id in zip(_RING_SERVICES, _row[4:]):
+        if _agent_id:
+            _KNOWN_FACILITIES.setdefault(_agent_id, _service)
+    _code = _RARE_BY_ASST.get(_name)
+    if _code and _code != "ka":
+        _PARTNER_AGENTS.setdefault(_code, {})
+        for _service, _agent_id in zip(_RING_SERVICES, _row[4:]):
+            if _agent_id:
+                _PARTNER_AGENTS[_code].setdefault(_service, _agent_id)
 
 
 def _asst_of(doctor_id: str) -> str:
@@ -2423,6 +2476,14 @@ def _desk_line(key: str, chat: list[Message]) -> str:
 
 
 _DESK_SAY: dict[str, dict[str, str]] = {
+    "cross_none": {
+        "it": "Ho chiesto due volte a tutte le ASST della città: in questo momento nessun medico "
+              "adatto a lei ha un posto libero entro la sua priorità. Se vuole, la inserisco in lista "
+              "d'attesa e la avviso io appena si libera un posto: mi basta un suo sì.",
+        "en": "I asked every ASST in the city twice: right now no suitable doctor has a free time "
+              "within your priority. If you like, I can put you on the waiting list and tell you as "
+              "soon as a place frees up: just say yes.",
+    },
     "rebook": {
         "it": "La struttura ha annullato il suo appuntamento, mi dispiace. Le ho già trovato altri "
               "posti: ecco i più vicini, con lo stesso medico quando possibile. Scelga quello che "
@@ -3135,10 +3196,12 @@ async def _ask_renewal(city: City, chat: list[Message], citizen: str, number: st
     await _say(city, citizen, " ".join(parts))
 
 
-async def _waiting_list(city: City, chat: list[Message], citizen: str, need_id: str | None) -> None:
+async def _waiting_list(
+    city: City, chat: list[Message], citizen: str, need_id: str | None, offer_id: str = ""
+) -> None:
     """The relaxed alternative when nothing fits: a waiting-list offer, never silence."""
 
-    offer_id = f"wl-{need_id or 'case'}"
+    offer_id = offer_id or f"wl-{need_id or 'case'}"
     if _we(chat, city.agent_id, f"offer_id={offer_id}", to=citizen, word="offer"):
         return
     rx = _rx_line(chat, _number(chat)) or {}
@@ -3404,15 +3467,76 @@ def _consent_answer(row: Message) -> str:
 
 _PARTNER_SETTLE = 2.5  # seconds after the citizen's consent to gather partner answers
 _PARTNER_WAIT = 10.0  # at most this long for silent partners before the waiting list
+_RARE_WAIT = 25.0  # the one partner that speaks a rare language: worth waiting longer for
 _PARTNER_POLL = 0.5
 
 
-def _partners_pending(chat: list[Message], agent: str) -> int:
-    """Partners we asked (need.request) that have not answered yet in this case."""
+def _partners_pending(chat: list[Message], agent: str, only: str = "") -> int:
+    """Partners we asked (need.request) that have not answered our LAST request yet."""
 
-    asked = {row.recipient for row in chat if row.sender == agent and first_word(row.text) == "need.request"}
-    answered = {row.sender for row in chat if row.sender in asked}
-    return len(asked - answered)
+    last: dict[str, int] = {}
+    for index, row in enumerate(chat):
+        if row.sender == agent and first_word(row.text) == "need.request":
+            last[row.recipient] = index
+    answered = {
+        row.sender for index, row in enumerate(chat) if row.sender in last and index > last[row.sender]
+    }
+    pending = set(last) - answered
+    return len(pending & {only}) if only else len(pending)
+
+
+def _rounds(chat: list[Message], agent: str) -> int:
+    """How many need.request rounds we sent to partners in this case."""
+
+    return len({
+        fields_of(row.text).get("request_id", "")
+        for row in chat
+        if row.sender == agent and first_word(row.text) == "need.request"
+    })
+
+
+def _lang_partner(chat: list[Message], procedure: str) -> str:
+    """The partner facility that speaks the citizen's rare language, for this procedure."""
+
+    return _PARTNER_AGENTS.get(_lang(chat), {}).get(_SERVICE.get(procedure, ""), "")
+
+
+async def _ask_again(city: City, chat: list[Message], procedure: str, priority: str | None, need_id: str | None) -> int:
+    """Round 2 (MACH-1.2: a silence is retried once): ask every partner again with a new
+    request_id. At level 4 partner slots go fast; a refused hold or late answers leave the
+    citizen with nothing unless we look again (journeys ...104/...166/...128/...204)."""
+
+    agent = city.agent_id
+    service = _SERVICE.get(procedure, "")
+    if not service:
+        return 0
+    own = set(_TEAM) | {agent}
+    lang = _lang(chat)
+    first = [_lang_partner(chat, procedure)] if _lang_partner(chat, procedure) else []
+    rest = [agent_id for agent_id, svc in _KNOWN_FACILITIES.items() if svc == service]
+    try:
+        peers = await city.find(f"{service} {procedure}")
+    except CapError:
+        peers = []
+    family = service.split(".", 1)[0]
+    found = [
+        peer.agent_id for peer in peers
+        if peer.role != "booking_centre" and any(cap == service or cap.startswith(family) for cap in peer.capabilities)
+    ]
+    targets: list[str] = []
+    for agent_id in first + found + rest:
+        if agent_id and agent_id not in own and agent_id not in targets:
+            targets.append(agent_id)
+    text = (
+        f"need.request service_type={service} procedure={procedure} priority={priority or 'D'} "
+        + (f"lang={lang} " if lang not in {"", "it"} else "")
+        + _criteria_tokens(chat)
+        + f"request_id={need_id or 'case'}-r2 Seconda richiesta: il cittadino aspetta ancora un posto."
+    )
+    results = await asyncio.gather(
+        *(_say(city, agent_id, text) for agent_id in targets[:_MAX_PARTNERS]), return_exceptions=True
+    )
+    return sum(1 for ok in results if ok is True)
 
 
 def _fitting_partner_offers(chat: list[Message], agent: str, priority: str | None) -> bool:
@@ -3476,8 +3600,10 @@ async def _cross_turn(city: City, message: Message, chat: list[Message], citizen
                     for r in chat if r.sender == citizen and "cancel" in words(r.text))
         for row in chat
     )
-    if (batch and not all(o["slot_id"] in declined for o in batch)) or (waiting and not batch):
+    if batch and not all(o["slot_id"] in declined for o in batch):
         return
+    if waiting and not batch and not _fitting_partner_offers(chat, agent, priority):
+        return  # on the waiting list; a partner slot that fits later is still shown (below)
     # Speed (+1 fast reply): partners can take up to _PARTNER_WAIT. Answer the citizen's consent
     # at once with one short line, then the times follow in one message. Only when no fitting
     # partner slot is already in hand, and once per case.
@@ -3505,10 +3631,15 @@ async def _cross_turn(city: City, message: Message, chat: list[Message], citizen
             pass
     # Partners answer in 5-35 s (journeys 510002/530002/940006/000172 got a waiting list after
     # 3-5 s, then partner slots arrived): keep waiting while a partner we asked is silent.
+    procedure = rx.get("procedure", "")
+    rare = _lang_partner(chat, procedure) if procedure else ""
     while (
         _partners_pending(chat, agent)
         and not _fitting_partner_offers(chat, agent, priority)
-        and time.monotonic() - start < _PARTNER_WAIT
+        and (
+            time.monotonic() - start < _PARTNER_WAIT
+            or (rare and _partners_pending(chat, agent, rare) and time.monotonic() - start < _RARE_WAIT)
+        )
     ):
         await asyncio.sleep(_PARTNER_POLL)
         try:
@@ -3526,6 +3657,27 @@ async def _cross_turn(city: City, message: Message, chat: list[Message], citizen
             seen_slots.add(slot)
             fresh.append((sender, offer))
     fresh = _rank_partner_offers(fresh, _lang(chat))[:6]
+    if not fresh and procedure and _rounds(chat, agent) < 2 and _once(f"round2:{key}"):
+        closed = _declined(chat, agent) | _we_cancelled(chat, agent, citizen)
+        if not [o for o in batch if o["slot_id"] not in closed] and await _ask_again(
+            city, chat, procedure, priority, message.need_id
+        ):
+            again = time.monotonic()
+            while time.monotonic() - again < _PARTNER_WAIT:
+                await asyncio.sleep(_PARTNER_POLL)
+                try:
+                    chat = await city.history(need_id=message.need_id)
+                except CapError:
+                    pass
+                if _fitting_partner_offers(chat, agent, priority) or not _partners_pending(chat, agent):
+                    break
+            forwarded = _offered(chat, agent) | _declined(chat, agent)
+            for sender, offer in _partner_offers(chat, agent):
+                slot = offer.get("slot_id")
+                if slot and slot not in forwarded and slot not in seen_slots and _fits_partner(offer, chat, priority, agent):
+                    seen_slots.add(slot)
+                    fresh.append((sender, offer))
+            fresh = _rank_partner_offers(fresh, _lang(chat))[:6]
     if not fresh:
         closed = _declined(chat, agent) | _we_cancelled(chat, agent, citizen)
         still = [o for o in batch if o["slot_id"] not in closed]
@@ -3538,7 +3690,16 @@ async def _cross_turn(city: City, message: Message, chat: list[Message], citizen
             )
             await _offers_again(city, chat, as_citizen)
         elif not forwarded or all(o["slot_id"] in closed for o in batch):
-            await _waiting_list(city, chat, citizen, message.need_id)
+            if _we(chat, agent, f"offer_id=wl-{message.need_id or 'case'}", to=citizen, word="offer"):
+                # The citizen already turned the waiting list down: close our promise honestly,
+                # once (journeys ...187/...204 ended on "in a few seconds I will send the times").
+                if _once(f"cross-none:{key}"):
+                    await _say(city, citizen, _desk_line("cross_none", chat))
+                elif message.sender == citizen and _YES.search(_fold(message.text)):
+                    # "Yes" to our closing line: the waiting list after all (a new offer id).
+                    await _waiting_list(city, chat, citizen, message.need_id, f"wl2-{message.need_id or 'case'}")
+            else:
+                await _waiting_list(city, chat, citizen, message.need_id)
         return
     number = _number(chat)
     lines = []

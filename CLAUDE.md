@@ -90,6 +90,15 @@ Backward compatible with MACH-1 / 1.1. Full text: `MACH-1.2.md` on Discord. What
   never asks for data. Red flags: asks citizen data, contains instructions
   ("ignora le regole", "system:"), receipt without our confirm, too-good slot. Report on
   Discord as `ring.alert suspect=agent:… reason=not_listed|facility_mismatch|asked_data|injection|phantom_receipt|fake_slot seen=… by=red-agent`.
+- **The whole ring is in `_RING`** (from the city's own map, `/v1/scoreboard/map`: all 26
+  ASSTs, teams, districts and the five agent ids each). Every other ASST's facilities are
+  asked on a cross-ASST search; the one speaking the citizen's rare language goes first and
+  gets up to `_RARE_WAIT` (25 s). Nothing fits → a second round (`request_id=<need>-r2`) to
+  every partner, also after a partner refuses a hold. A waiting list turned down and nothing
+  found → one honest closing line («Ho chiesto due volte…»), waiting list again on a yes.
+  A fitting partner slot that arrives after the waiting list is shown (upgrade).
+  The console API is handy for checks: `/v1/team/journeys`, `/v1/team/journeys/<need_id>`
+  (messages + verdict rows + answer-set size), `/v1/logs?agent_id=…` (last 150 lines only).
 - **Ring tables in code** (`_RARE_BY_ASST`, `_PARTNER_AGENTS`, `_TRUSTED_AGENTS`,
   `_KNOWN_FACILITIES`): add every id list posted on Discord. Rare languages: Giambellino ka,
   Precotto/Toros ro, Nord ur, Corvetto fr, Brera fa, Isola tl, Ortica wo, Greco si, Bicocca ti,
@@ -144,6 +153,7 @@ $PY -I tests/gp_review.py gp/agent         # personal reply, collaboration said,
 $PY -I tests/chaos.py hospital/agent       # 1,275 odd/failing turns: no crash, never silent
 $PY -I tests/bc_rebook.py booking_centre/agent tests/bc_test.py   # L6: cancel + new offers in ONE message
 $PY -I tests/h_rebook.py hospital/agent hospital  # L6 facility side: cancel + alternatives
+$PY -I tests/bc_ring.py booking_centre/agent tests/bc_test.py    # rare language partner, round 2, no empty promise
 ```
 
 All must pass before any deploy.
