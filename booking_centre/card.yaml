@@ -1,7 +1,7 @@
 agent_id: agent:cdc7x6m21nj6
 team: team:red-agent
 name: booking_centre
-version: 1.0.30
+version: 1.0.31
 cap_versions:
   - "1.0"
 profiles:

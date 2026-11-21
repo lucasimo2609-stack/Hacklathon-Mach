@@ -816,16 +816,6 @@ _QUIET = {
         "fr": "Parfait : j'enregistre la réservation auprès de la structure, le justificatif "
         "arrive dans quelques secondes.",
     },
-    "cross_still": {
-        "it": "La sto ancora cercando nelle ASST vicine e lei resta in lista d'attesa: le scrivo "
-        "appena trovo un posto adatto, non deve fare nulla.",
-        "en": "I am still searching the nearby ASSTs and you stay on the waiting list: I will "
-        "write as soon as I find a suitable time, you do not need to do anything.",
-        "es": "Sigo buscando en las ASST cercanas y usted sigue en la lista de espera: le escribo "
-        "en cuanto encuentre una hora adecuada.",
-        "fr": "Je cherche encore dans les ASST voisines et vous restez sur la liste d'attente : "
-        "je vous écris dès que je trouve un horaire adapté.",
-    },
     "ledger_slow": {
         "it": "Sto verificando con il registro regionale, che in questo momento è lento: le "
         "mando gli orari appena risponde. Se tra un minuto non ha notizie, mi riscriva.",
@@ -911,15 +901,6 @@ async def _never_silent(role: str, city: City, message: Message, chat: list[Mess
                 line = _desk_line("number", fresh)
             else:
                 line = "data.request purpose=booking fields=prescription_number " + _desk_line("number", fresh)
-        elif _asked_cross(fresh, agent, message.sender) and any(
-            row.sender == agent and row.recipient == message.sender and "waiting_list=true" in row.text
-            for row in fresh
-        ):
-            # Waiting on partner ASSTs, not on the register (21 Nov ...550007 heard "registro
-            # lento" three times while on the partner search): say what is really happening.
-            line = _quiet_line("cross_still", lang)
-        elif _asked_cross(fresh, agent, message.sender) and _latest_batch(fresh, agent, message.sender):
-            line = _desk_line("choose", fresh)  # partner times are in front of them: pick one
         else:
             line = _quiet_line("ledger_slow", lang)
     else:
@@ -2457,8 +2438,6 @@ def _lang_asked(text: str) -> str:
         if code and code != "it":
             return code
     return ""
-
-
 
 
 def _script_lang(text: str) -> str:
@@ -4074,23 +4053,6 @@ async def _cross_turn(city: City, message: Message, chat: list[Message], citizen
         return
     if waiting and not batch and not _fitting_partner_offers(chat, agent, priority):
         return  # on the waiting list; a partner slot that fits later is still shown (below)
-    # 21 Nov ...550007: the citizen wrote again after consenting, partners still silent; the turn
-    # said nothing (the fallback answered "registro lento" three times) and the journey ended
-    # -1 no_alternative. A later citizen message with nothing offered yet gets the waiting list
-    # now (0, not -1); a fitting partner slot arriving later is still shown as an upgrade.
-    consented_at = next(
-        (row.msg_id for row in after if _consent_answer(row, "cross_asst") == "yes"), ""
-    )
-    if (
-        message.sender == citizen
-        and consented_at
-        and message.msg_id != consented_at
-        and not batch
-        and not waiting
-        and not _fitting_partner_offers(chat, agent, priority)
-    ):
-        await _waiting_list(city, chat, citizen, message.need_id)
-        return
     # Speed (+1 fast reply): partners can take up to _PARTNER_WAIT. Answer the citizen's consent
     # at once with one short line, then the times follow in one message. Only when no fitting
     # partner slot is already in hand, and once per case.
