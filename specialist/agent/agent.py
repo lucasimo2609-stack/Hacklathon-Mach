@@ -947,6 +947,10 @@ def _speaks(doctor_id: str, lang: str) -> bool:
     known = _RARE_BY_ASST.get(_asst_of(doctor_id))
     if known is not None:
         return lang == known
+    # An ASST not in our table: if the table already names who speaks this language, it is
+    # not this one (journeys ...141/...151/...172: a German speaker got Bovisa's h3).
+    if lang in _RARE_BY_ASST.values():
+        return False
     return True
 
 
@@ -955,11 +959,18 @@ def _speaks(doctor_id: str, lang: str) -> bool:
 _RARE_BY_ASST: dict[str, str] = {
     "giambellino": "ka", "toros": "ro", "precotto": "ro", "nord": "ur", "corvetto": "fr",
     "brera": "fa", "isola": "tl", "ortica": "wo", "greco": "si", "bicocca": "ti", "lambrate": "ja",
-    "gorla": "sq", "forlanini": "de",
+    "gorla": "sq", "forlanini": "de", "citta-studi": "tr", "cittastudi": "tr",
 }
 _DISTRICT_BY_LANG: dict[str, int] = {"ro": 9, "ur": 2, "fr": 3, "fa": 7, "tl": 8, "wo": 6}
 # Agents of other teams listed on Discord (team -> ids). Add every list that is posted.
 _TRUSTED_AGENTS: set[str] = {
+    # asst-precotto, team Toros (MACH-1.2 ring list)
+    "agent:ser7es7thgwf", "agent:n4yjr7kjbmrx", "agent:s1twcdzg3296", "agent:f2s88vwd3jnf",
+    "agent:nf9pqsgzrwm0",
+    # asst-nord booking centre and GP (MACH-1.2 ring list)
+    "agent:psxp8bh1feaa", "agent:wwxaphfb5pfh",
+    # asst-isola, team Diuo (partial: specialist, consultorio)
+    "agent:etpwrfmfa8hm", "agent:mkfzagfe8jtt",
     # asst-nord, team agentic-paguri
     "agent:gpr1zqe343gb", "agent:zand0f57ec1j", "agent:ccjzqm7yekwx",
     # asst-greco, team tartufi-pazzi
@@ -998,6 +1009,15 @@ _STRICT_PARTNERS = os.environ.get("CITY_STRICT_PARTNERS", "") == "1"
 # Partner facilities the teams gave us on Discord (service -> agent id), by rare language.
 # They are asked first for that language, and always asked, even if the Index misses them.
 _PARTNER_AGENTS: dict[str, dict[str, str]] = {
+    "ro": {  # asst-precotto, team Toros (Romanian)
+        "hospital.physiatry": "agent:s1twcdzg3296",
+        "specialist_care.cardiology": "agent:f2s88vwd3jnf",
+        "family_counseling.gynecology": "agent:nf9pqsgzrwm0",
+    },
+    "tl": {  # asst-isola, team Diuo (Tagalog; hospital id not published yet)
+        "specialist_care.cardiology": "agent:etpwrfmfa8hm",
+        "family_counseling.gynecology": "agent:mkfzagfe8jtt",
+    },
     "fr": {  # asst-corvetto, team scuola-di-atene (French)
         "hospital.physiatry": "agent:x0vr9rbwpesr",
         "specialist_care.cardiology": "agent:h8425ac7btd8",
@@ -1028,7 +1048,8 @@ _PARTNER_AGENTS: dict[str, dict[str, str]] = {
 
 def _asst_of(doctor_id: str) -> str:
     parts = doctor_id.split("-")
-    return parts[1] if len(parts) >= 3 and parts[0] == "asst" else ""
+    # asst-citta-studi-h3 -> citta-studi (ASST names can have a dash)
+    return "-".join(parts[1:-1]) if len(parts) >= 3 and parts[0] == "asst" else ""
 
 
 def fitting(
@@ -2238,6 +2259,14 @@ def _days_in_words(text: str) -> frozenset[str] | None:
     return frozenset(picked) or None
 
 
+def _slot_weekday(slot: dict[str, str]) -> str:
+    day = (slot.get("day") or slot.get("agenda_day") or "").lower()
+    if day:
+        return _DAY_KEYS.get(_fold(day)[:3], day[:3])
+    when = _when(slot.get("at", "") or slot.get("agenda_date", ""))
+    return _WEEKDAYS[when.weekday()] if when is not None else ""
+
+
 def _days(chat: list[Message]) -> frozenset[str] | None:
     """The weekdays the citizen asked for (``days=mon/wed``), if any."""
 
@@ -3008,6 +3037,19 @@ def _since_cross(chat: list[Message], agent: str, citizen: str) -> list[Message]
 _DOCTOR_ID = re.compile(r"^asst-[a-z0-9]+(?:-[a-z0-9]+)*-[hsc]\d$")
 
 
+def _criteria_tokens(chat: list[Message]) -> str:
+    """MACH-1.2 extended criteria for a partner need.request: search keys only, no personal data."""
+
+    parts = []
+    gender = _gender(chat)
+    if gender in {"m", "f"}:
+        parts.append(f"gender_preference={gender}")
+    days = _days(chat)
+    if days:
+        parts.append("days=" + "/".join(d for d in _WEEKDAYS if d in days))
+    return "".join(part + " " for part in parts)
+
+
 def _partner_offers(chat: list[Message], agent: str) -> list[tuple[str, dict[str, str]]]:
     """Offers from partner facilities. Security (impostor agents from 21 Nov): only from an
     agent we asked in this case, with a real doctor id, and naming no other facility."""
@@ -3147,8 +3189,8 @@ async def _go_partner(
     text = (
         f"need.request service_type={service} procedure={procedure} priority={priority or 'D'} "
         + (f"lang={_lang(chat)} " if _lang(chat) not in {"", "it"} else "")
-        + ""
-        f"request_id={need_id or 'case'} Richiesta di disponibilità da un'ASST partner."
+        + _criteria_tokens(chat)
+        + f"request_id={need_id or 'case'} Richiesta di disponibilità da un'ASST partner."
     )
     results = await asyncio.gather(
         *(_say(city, agent_id, text) for agent_id in unique[:_MAX_PARTNERS]),
@@ -3841,6 +3883,10 @@ async def _partner_request(
     # Ortica and others send gender_preference= when the citizen asked for it.
     want_gender = (fields.get("gender_preference") or fields.get("gender") or "").lower()
     want_gender = want_gender if want_gender in {"m", "f"} else None
+    want_days = frozenset(
+        _DAY_KEYS.get(_fold(part)[:3], "") for part in re.split(r"[/,;|+]", fields.get("days", "")) if part
+    ) - {""}
+    relaxed: dict[str, str] = {}
     if not procedure:
         return
     if not request and any(row.sender == agent and row.recipient == partner for row in chat):
@@ -3868,18 +3914,34 @@ async def _partner_request(
     slots: list[dict[str, str]] = []
     if now is not None and world is not None:
         lines = [line for line in world.splitlines() if "slot_id=" in line]
-        ours = [
-            slot
-            for slot in fitting(lines, now=now, priority=priority, lang=want_lang or "it",
-                                gender=want_gender, procedure=procedure)
-            if slot.get("facility", "") in mine
-        ]
-        if not ours and want_lang:
-            ours = [
+        def base(lang: str, gender: str | None) -> list[dict[str, str]]:
+            return [
                 slot
-                for slot in fitting(lines, now=now, priority=priority, lang="it", procedure=procedure)
+                for slot in fitting(lines, now=now, priority=priority, lang=lang,
+                                    gender=gender, procedure=procedure)
                 if slot.get("facility", "") in mine
             ]
+
+        def on_days(slot: dict[str, str]) -> bool:
+            return not want_days or _slot_weekday(slot) in want_days
+
+        ours = [slot for slot in base(want_lang or "it", want_gender) if on_days(slot)]
+        if not ours:
+            # MACH-1.2 relaxed offers: up to 3 slots that break ONE criterion, marked relaxed=.
+            tries = []
+            if want_days:
+                tries.append(("days", base(want_lang or "it", want_gender)))
+            if want_gender:
+                tries.append(("gender", [s for s in base(want_lang or "it", None) if on_days(s)]))
+            if want_lang and want_lang != "it":
+                tries.append(("lang", [s for s in base("it", want_gender) if on_days(s)]))
+            for tag, found in tries:
+                for slot in found:
+                    if len(relaxed) >= 3:
+                        break
+                    if slot.get("slot_id") and slot["slot_id"] not in relaxed:
+                        relaxed[slot["slot_id"]] = tag
+                        ours.append(slot)
         # One slot per doctor first: a partner usually comes to us for a doctor it lacks
         # (often our Georgian-speaking h3), not for our earliest hour.
         seen: set[str] = set()
@@ -3907,11 +3969,19 @@ async def _partner_request(
         await _say(city, partner, f"cancel reason=no_availability procedure={procedure}{tail}")
         return
     offers = []
+    tail = f" request_id={request_id}" if request_id else ""
+    if relaxed:
+        offers.append(f"cancel reason=no_availability procedure={procedure}{tail}")
     for slot in slots:
         line = _offer_line({**slot, "facility": agent}, None, priority).replace("+00:00", "")  # MACH-1.1: ISO, no zone
         # No doctor_lang / doctor_gender: the citizen checks them in the registry, and the
         # format agreed with the other teams on Discord carries doctor_id only.
-        offers.append(f"{line} request_id={request_id}" if request_id else line)
+        line += tail
+        if slot.get("slot_id") in relaxed:
+            line += f" relaxed={relaxed[slot['slot_id']]}"
+        offers.append(line)
+    if relaxed:
+        offers.append("Con tutti i vincoli non c'è posto: questi sono i più vicini, cambia una sola condizione")
     await _say(city, partner, "\n".join(offers))
 
 
@@ -4189,7 +4259,11 @@ async def _on_refused(
         extra = f" code={ledger_code} ledger_code={ledger_code}" if ledger_code else ""
         if ledger_code == "CONSENT_MISSING":
             reason = "consent_missing"
-        elif any(word in ledger_code for word in ("TAKEN", "HELD", "BOOKED", "NO_CAPACITY", "CONFLICT")):
+        elif ledger_code == "PRESCRIPTION_EXPIRED":
+            reason = "prescription_expired"
+        elif ledger_code == "NO_CAPACITY":
+            reason = "no_capacity"
+        elif any(word in ledger_code for word in ("TAKEN", "HELD", "BOOKED", "CONFLICT")):
             reason = "slot_taken"
         elif ledger_code in {"EXPIRED", "PAST", "SLOT_PAST", "TOO_LATE"}:
             reason = "expired"
