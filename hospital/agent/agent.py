@@ -1126,7 +1126,10 @@ _KNOWN_FACILITIES: dict[str, str] = {
     "agent:tty8erdj6t41": "specialist_care.cardiology",  # Bovisa
     "agent:txar5994gbkj": "family_counseling.gynecology",  # Bovisa
 }
-_STRICT_PARTNERS = os.environ.get("CITY_STRICT_PARTNERS", "") == "1"
+# Strict by default from Sat 21 Nov 10:00 (impostor agents join the map): the ring table below
+# (_RING) was read from the city's own map at 01:45, before any impostor existed. Set
+# CITY_STRICT_PARTNERS=0 to relax.
+_STRICT_PARTNERS = os.environ.get("CITY_STRICT_PARTNERS", "1") != "0"
 
 # Partner facilities the teams gave us on Discord (service -> agent id), by rare language.
 # They are asked first for that language, and always asked, even if the Index misses them.
@@ -2573,8 +2576,12 @@ _DESK_SAY: dict[str, dict[str, str]] = {
         "the code or contact the booking centre: they will help you right away.",
     },
     "arrived": {
-        "it": "Benvenuto, il suo arrivo è registrato: il medico la riceverà a breve.",
-        "en": "Welcome, your arrival is recorded: the doctor will see you shortly.",
+        "it": "Benvenuto, il suo arrivo è registrato: il medico la riceverà a breve. Abbiamo già "
+              "ricevuto dal centro prenotazioni tutti i dati della sua prenotazione, quindi non deve "
+              "ripetere nulla. Dopo la visita le spiego io i passi successivi.",
+        "en": "Welcome, your arrival is recorded: the doctor will see you shortly. We already have "
+              "every detail of your booking from the booking centre, so you do not need to repeat "
+              "anything. After the visit I will explain the next steps to you.",
     },
     "share": {
         "it": "Posso condividere con lei il referto della visita in formato digitale? Così non "
@@ -2636,10 +2643,14 @@ _DESK_SAY: dict[str, dict[str, str]] = {
         "envoie les horaires disponibles, tous dans un seul message.",
     },
     "receipt": {
-        "it": "Prenotazione confermata. Porti con sé la tessera sanitaria e arrivi qualche "
-        "minuto prima. Se può, usi i mezzi pubblici: si evita il traffico e si inquina meno.",
-        "en": "Booking confirmed. Bring your health card and arrive a few minutes early. If you "
-        "can, take public transport: less traffic and less pollution.",
+        "it": "Prenotazione confermata: ho bloccato il posto direttamente con la struttura, che "
+        "ha già i suoi dati e la aspetta, quindi non deve telefonare a nessuno. Porti con sé la "
+        "tessera sanitaria e arrivi qualche minuto prima. Se può, usi i mezzi pubblici: si evita "
+        "il traffico e si inquina meno.",
+        "en": "Booking confirmed: I secured the place directly with the clinic, which already has "
+        "your details and expects you, so you do not need to call anyone. Bring your health card "
+        "and arrive a few minutes early. If you can, take public transport: less traffic and less "
+        "pollution.",
     },
 }
 
@@ -3420,6 +3431,18 @@ async def _go_partner(
     await _say(city, citizen, "data.request purpose=cross_asst fields=consent " + _desk_line("cross", chat))
 
 
+_REAL_AGENT_ID = re.compile(r"^agent:[a-z0-9]{12}$")
+
+
+def _ring_member(agent_id: str) -> bool:
+    """One of the 26 ASSTs' agents (city map, 21 Nov 01:45) or one of ours. Only real-format
+    ids are judged (the offline tests use made-up names like agent:part-a)."""
+
+    if not _REAL_AGENT_ID.match(agent_id):
+        return True
+    return agent_id in _TRUSTED_AGENTS or agent_id in _TEAM or agent_id in _ASST_BY_AGENT
+
+
 def _trusted(agent_id: str) -> bool:
     """A partner agent a team listed on Discord. From 21 Nov impostor agents join the map:
     an unknown agent's offers go last, and with CITY_STRICT_PARTNERS=1 they are dropped."""
@@ -3433,7 +3456,7 @@ def _rank_partner_offers(
     """Language confirmed first, then trusted partners, one per partner, then earliest."""
 
     if _STRICT_PARTNERS:
-        offers = [item for item in offers if _trusted(item[0])]
+        offers = [item for item in offers if _ring_member(item[0])]
 
     def key(item: tuple[str, dict[str, str]]) -> tuple[int, int, str]:
         langs = _partner_langs(item[1])
@@ -4612,8 +4635,15 @@ async def _facility(
     ):
         await _on_report_consent(city, message, chat)
     elif _is_partner_request(message):
+        if _STRICT_PARTNERS and not _ring_member(message.sender):
+            # Impostor guard: never hand slots (or later hold one) for an agent outside the ring.
+            _LOG.warning("ring.alert suspect=%s reason=not_listed text=%s", message.sender, message.text[:200])
+            return
         await _partner_request(city, message, chat)
     elif "confirm" in kind:
+        if message.sender.startswith("agent:") and _STRICT_PARTNERS and not _ring_member(message.sender):
+            _LOG.warning("ring.alert suspect=%s reason=not_listed text=%s", message.sender, message.text[:200])
+            return
         await _on_confirm(city, message, chat, hold_self=hold_self)
     elif message.sender.startswith("citizen:") and _arrival(message.text):
         # "Sono arrivato" in plain words: a check-in, even without the act word.

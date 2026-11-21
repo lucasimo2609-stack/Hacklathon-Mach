@@ -155,6 +155,7 @@ $PY -I tests/bc_rebook.py booking_centre/agent tests/bc_test.py   # L6: cancel +
 $PY -I tests/h_rebook.py hospital/agent hospital  # L6 facility side: cancel + alternatives
 $PY -I tests/bc_ring.py booking_centre/agent tests/bc_test.py    # rare language partner, round 2, no empty promise
 $PY -I tests/h_l7.py hospital/agent hospital      # L7: duplicate request -> same offers, duplicate confirm -> same receipt
+$PY -I tests/impostor.py hospital/agent hospital  # Sat 10:00: agents outside the ring get no slots, holds or citizens
 ```
 
 All must pass before any deploy.
@@ -165,6 +166,21 @@ Every 30 min: Journeys (all waves, "Prima i falliti") → open each Fallito / NE
 verdict line; read agent Log tabs; check level on the public board. Fix only clear,
 reproducible causes, add a test scenario, run all suites, push, deploy only affected agents one
 at a time.
+
+## State (Sat 21 Nov, 08:30)
+
+- Live since the 06:00 freeze: GP 1.0.9, booking 1.0.18, hospital 1.0.6, specialist 1.0.6,
+  consultorio 1.0.6. GP was DOWN 02:40-05:15 (failed deploy: "Finished server process", no
+  log after; console still said visible): it cost ~1,000 points and dropped us to 24th.
+  After a deploy that ends in an error, check the agent's Log tab for a fresh "brain done" /
+  health line, not only `city status`; if dead, `city rollback agent:<id> --to <last good>`.
+- Leaderboard lesson: the top teams' GPs have 1,350-1,850 ratings at ~2.9 points each; their
+  booking centres are at -500/-1,300 (failed cases restart every 15 min and pass the GP again).
+  Our GP is at 2.4 per rating: the review +1s (collaboration, proactivity, domain) are the
+  honest lever, and they need the real exchange SAID in the citizen's message.
+- Impostors (Sat 10:00): strict ring by default (`CITY_STRICT_PARTNERS`, default on). Only
+  agents on the city map of 01:45 (`_RING`) or ours get slots/holds/offers to citizens;
+  others are logged as `ring.alert suspect=… reason=not_listed`.
 
 ## State (21 Nov, early)
 
